@@ -55,15 +55,18 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     work = vod_dir(vod)
     work.mkdir(parents=True, exist_ok=True)
     ranges = [(max(0.0, lo), min(vod.duration, hi)) for lo, hi in (ranges or [(0.0, vod.duration)])]
-    span = (min(lo for lo, _ in ranges), max(hi for _, hi in ranges))
-    whole = span[0] <= 1.0 and span[1] >= vod.duration - 1.0
-    # Bump "v" when the format of a saved step changes, so old results are redone.
-    key = {"v": 3, "span": [round(span[0]), round(span[1])],
-           "ranges": [[round(a), round(b)] for a, b in ranges]}
+    # The audio is always downloaded whole. A full download runs many pieces in
+    # parallel and gives a file whose clock is exactly the VOD's; a partial one
+    # goes through ffmpeg piece by piece and starts at an offset that is only
+    # known to within a stream segment. Only the costly steps, chat and
+    # transcription, are limited to the wanted ranges.
+    span = (0.0, vod.duration)
+    busy = (int(min(lo for lo, _ in ranges)), int(max(hi for _, hi in ranges)))
+    range_key = [[round(a), round(b)] for a, b in ranges]
     state_path = work / "analysis.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
-    if state.get("key") != key:
-        state = {"key": key}
+    if state.get("v") != 4:            # bump when the format of a saved step changes
+        state = {"v": 4}
 
     def remember(**values) -> None:
         state.update(values)
@@ -73,10 +76,9 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     audio_path = Path(state["audio"]) if state.get("audio") and Path(state["audio"]).exists() else None
     if audio_path is None:
         progress("download audio", 0.0)
-        audio_path = platforms.download_audio(
-            vod.url, work / "audio", None if whole else span[0], None if whole else span[1],
-            progress=lambda f: progress("download audio", f))
-        remember(audio=str(audio_path))
+        audio_path = platforms.download_audio(vod.url, work / "audio",
+                                              progress=lambda f: progress("download audio", f))
+        remember(audio=str(audio_path), loudness=False)
     progress("download audio", 1.0)
 
     # 2. loudness
@@ -93,17 +95,20 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     # 3. chat (Twitch only; other platforms have no replay we can read)
     chat_path = work / "chat.npy"
     chat_rate: np.ndarray | None = None
+    covered = state.get("chat_span")
     if state.get("chat") == "none":
         chat_rate = None
-    elif state.get("chat") and chat_path.exists():
+    elif covered and covered[0] <= busy[0] and busy[1] <= covered[1] and chat_path.exists():
         chat_rate = np.load(chat_path)
     elif vod.platform == "twitch":
         progress("chat", 0.0)
         try:
-            chat_rate = chat.twitch_chat_rate(vod.vod_id, vod.duration, span[0], span[1],
-                                              progress=lambda f: progress("chat", f))
+            part = chat.twitch_chat_rate(vod.vod_id, vod.duration, busy[0], busy[1],
+                                         progress=lambda f: progress("chat", f))
+            chat_rate = np.zeros(max(len(loudness), busy[0] + len(part)), dtype=np.float32)
+            chat_rate[busy[0]:busy[0] + len(part)] = part
             np.save(chat_path, chat_rate)
-            remember(chat=True)
+            remember(chat=True, chat_span=list(busy))
         except chat.ChatError as exc:
             remember(chat="none", chat_error=str(exc))
             chat_rate = None
@@ -113,22 +118,21 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
 
     # 4. transcript
     transcript_path = work / "transcript.json"
-    if state.get("transcript") and transcript_path.exists():
+    if state.get("transcript_ranges") == range_key and transcript_path.exists():
         transcript = transcribe.load(transcript_path)
         stats = state.get("stats", {})
     else:
         progress("transcribe", 0.0)
         cfg = settings["transcription"]
-        file_ranges = None if (whole and len(ranges) == 1) else [(lo - span[0], hi - span[0]) for lo, hi in ranges]
+        whole = len(ranges) == 1 and ranges[0][0] <= 1.0 and ranges[0][1] >= vod.duration - 1.0
         transcript, tstats = transcribe.transcribe(
             audio_path, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)),
-            ranges=file_ranges, time_offset=span[0],
-            progress=lambda f: progress("transcribe", f))
+            ranges=None if whole else ranges, progress=lambda f: progress("transcribe", f))
         transcribe.save(transcript, transcript_path)
         stats = {"audio_seconds": round(tstats.audio_seconds, 1), "wall_seconds": round(tstats.wall_seconds, 1),
                  "speed": round(tstats.speed, 2), "device": tstats.device, "model": tstats.model,
                  "compute_type": tstats.compute_type}
-        remember(transcript=True, stats=stats)
+        remember(transcript_ranges=range_key, stats=stats)
     progress("transcribe", 1.0)
 
     return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, transcript, stats)
@@ -144,9 +148,11 @@ def produce(source: Path, source_start: float, start: float, end: float, transcr
 
     words = [[w[0] - start, w[1] - start, w[2]] for w in transcribe.words_between(transcript, start, end)]
     overlay_dir = Path(tempfile.mkdtemp(prefix="snipr-overlay-"))
+    options = layout or {}
     try:
-        overlays = captions.build_overlays(words, headline, end - start, overlay_dir,
-                                           stacked=render.is_stacked(layout))
+        overlays = captions.build_overlays(
+            words, headline if options.get("show_headline", True) else "", end - start, overlay_dir,
+            stacked=render.is_stacked(layout), style=captions.get_style(options.get("caption_style")))
         return render.render_clip(source, source_start, start, end, out_path, layout, overlays)
     finally:
         shutil.rmtree(overlay_dir, ignore_errors=True)

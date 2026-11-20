@@ -29,6 +29,9 @@ FONT_DIR = Path(__file__).parent.parent / "assets" / "fonts"
 
 MODES = ("highlights", "informative", "custom")
 LAYOUTS = ("fill", "stacked")
+CAPTION_STYLES = ("box", "bold")
+LAYOUT_DEFAULTS = {"type": "fill", "crop": None, "facecam": None, "gameplay": None,
+                   "caption_style": "box", "show_headline": True}
 DEST_PLATFORMS = ("youtube", "tiktok", "facebook")
 REJECT_REASONS = (None, "boring", "bad_cut", "wrong_topic", "bad_framing", "other")
 WHISPER_MODELS = ("small", "medium", "large-v3")
@@ -120,7 +123,8 @@ def streamer_out(s: dict) -> dict:
         "mode": s["mode"], "instructions": s["instructions"], "games": s["games"],
         "max_clips_per_vod": s["max_clips_per_vod"], "clip_min_s": s["clip_min_s"], "clip_max_s": s["clip_max_s"],
         "layout": s["layout"], "crop_rect": s["crop_rect"], "facecam_rect": s["facecam_rect"],
-        "gameplay_rect": s["gameplay_rect"], "default_destination_id": s["default_destination_id"],
+        "gameplay_rect": s["gameplay_rect"], "caption_style": s["caption_style"],
+        "show_headline": bool(s["show_headline"]), "default_destination_id": s["default_destination_id"],
         "enabled": bool(s["enabled"]),
         "sample_frame": _frame_info(s["sample_frame"], s["sample_w"], s["sample_h"]),
         "stats": {"pending": counts.get("pending_review", 0), "approved": counts.get("approved", 0),
@@ -135,7 +139,7 @@ def clip_out(c: dict) -> dict:
     vod = db.get("vods", c["vod_id"])
     streamer = db.get("streamers", vod["streamer_id"])
     ready = c["render_state"] == "ready" and c["file_path"] and Path(c["file_path"]).exists()
-    layout = {"type": "fill", "crop": None, "facecam": None, "gameplay": None, **(c["layout"] or {})}
+    layout = {**LAYOUT_DEFAULTS, **(c["layout"] or {})}
     source_range = ({"start_s": c["source_start"], "end_s": c["source_end"]}
                     if c["source_start"] is not None else {"start_s": c["start_s"], "end_s": c["end_s"]})
     return {
@@ -219,10 +223,12 @@ def _streamer_fields(body: dict, current: dict | None) -> dict:
     """Validate the editable streamer fields in ``body`` against the existing row."""
     merged = dict(current or {"mode": "highlights", "instructions": "", "games": "", "max_clips_per_vod": 5,
                               "clip_min_s": 20, "clip_max_s": 60, "layout": "fill", "crop_rect": None,
-                              "facecam_rect": None, "gameplay_rect": None, "default_destination_id": None,
-                              "enabled": True})
+                              "facecam_rect": None, "gameplay_rect": None, "caption_style": "box",
+                              "show_headline": True, "default_destination_id": None, "enabled": True})
     out: dict = {}
-    for key in ("name", "mode", "instructions", "games", "layout"):
+    if "show_headline" in body:
+        out["show_headline"] = bool(body["show_headline"])
+    for key in ("name", "mode", "instructions", "games", "layout", "caption_style"):
         if key in body:
             if not isinstance(body[key], str):
                 raise bad(f"{key} must be text.")
@@ -250,6 +256,8 @@ def _streamer_fields(body: dict, current: dict | None) -> dict:
         raise bad("Mode must be Highlights, Informative or Custom.")
     if merged["layout"] not in LAYOUTS:
         raise bad("Layout must be Fill frame or Stacked.")
+    if merged["caption_style"] not in CAPTION_STYLES:
+        raise bad("Caption style must be Box or Bold.")
     if merged["mode"] == "custom" and not merged["instructions"].strip():
         raise bad("Custom mode needs instructions describing what to look for.")
     if merged["clip_min_s"] > merged["clip_max_s"]:
@@ -452,18 +460,23 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
             raise bad(f"The clip would be {length:.0f} seconds long. This streamer's clips must be "
                       f"{streamer['clip_min_s']:.0f} to {streamer['clip_max_s']:.0f} seconds.")
         values.update(start_s=round(float(start), 3), end_s=round(float(end), 3))
+    current_layout = {**LAYOUT_DEFAULTS, **(clip["layout"] or {})}
     if "layout" in body:
         layout = body["layout"] or {}
         if not isinstance(layout, dict) or layout.get("type") not in LAYOUTS:
             raise bad("Layout must be Fill frame or Stacked.")
+        style = layout.get("caption_style", current_layout["caption_style"])
+        if style not in CAPTION_STYLES:
+            raise bad("Caption style must be Box or Bold.")
         new_layout = {"type": layout["type"], "crop": _rect(layout.get("crop"), "Crop area"),
                       "facecam": _rect(layout.get("facecam"), "Facecam area"),
-                      "gameplay": _rect(layout.get("gameplay"), "Gameplay area")}
+                      "gameplay": _rect(layout.get("gameplay"), "Gameplay area"),
+                      "caption_style": style,
+                      "show_headline": bool(layout.get("show_headline", current_layout["show_headline"]))}
         if new_layout["type"] == "stacked" and not (new_layout["facecam"] and new_layout["gameplay"]):
             raise bad("Stacked layout needs both rectangles marked: the facecam and the gameplay.")
         values["layout"] = new_layout
 
-    current_layout = {"type": "fill", "crop": None, "facecam": None, "gameplay": None, **(clip["layout"] or {})}
     rerender = (values.get("start_s", clip["start_s"]) != clip["start_s"]
                 or values.get("end_s", clip["end_s"]) != clip["end_s"]
                 or values.get("headline", clip["headline"]) != clip["headline"]

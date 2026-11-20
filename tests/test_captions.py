@@ -94,6 +94,26 @@ def test_highlight_does_not_shift_the_other_words():
     assert column(first) == column(second)
 
 
+def test_bold_style_colours_the_word_instead_of_boxing_it():
+    bold = captions.get_style("bold")
+    count = lambda image, colour: sum(n for n, c in image.getcolors(maxcolors=1 << 20) if c == colour)
+    lit = captions.draw_caption(["GTA", "6"], 0, bold)
+    plain = captions.draw_caption(["GTA", "6"], None, bold)
+    assert count(lit, bold.accent) > 2000 and count(plain, bold.accent) == 0
+    assert count(lit, bold.ink) > 500                       # the other word stays white
+    assert lit.getbbox()[3] - lit.getbbox()[1] > 90         # big type
+    assert captions.get_style(None) is captions.STYLE and captions.get_style("nonsense") is captions.STYLE
+
+
+def test_bold_style_uses_capitals_two_words_at_a_time_and_can_drop_the_headline(tmp_path):
+    words = _w((0.5, 0.8, "gta"), (0.9, 1.2, "six"), (1.3, 1.7, "is"), (1.8, 2.2, "more"), (2.3, 2.9, "realistic"))
+    out = captions.build_overlays(words, "", 5.0, tmp_path, style=captions.get_style("bold"))
+    assert out.headline_png is None
+    assert [[w[2] for w in line.words] for line in out.lines] == [["GTA", "SIX"], ["IS", "MORE"], ["REALISTIC"]]
+    bottom = out.captions_y + captions.caption_strip_height(captions.get_style("bold"))
+    assert bottom <= 1920 - 380                             # stays above the zone the apps cover
+
+
 def test_headline_wraps_to_two_lines_and_shrinks_before_truncating():
     lines, size = captions.wrap_headline("Getting 5 stars in GTA 6")
     assert lines == ["Getting 5 stars in GTA 6"] and size == 64

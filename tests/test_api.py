@@ -92,7 +92,8 @@ def test_review_queue_lists_clips_with_everything_the_page_needs(client, seeded)
     assert clip["streamer_name"] == "pixelmoth" and clip["duration_s"] == 41.0 and clip["min_score"] == 0.6
     assert clip["video_url"] == f"/media/clips/{clip['id']}.mp4?v=0" and clip["render_state"] == "ready"
     assert clip["source_range"] == {"start_s": 8028.0, "end_s": 8109.0}
-    assert clip["layout"] == {"type": "fill", "crop": None, "facecam": None, "gameplay": None}
+    assert clip["layout"] == {"type": "fill", "crop": None, "facecam": None, "gameplay": None,
+                              "caption_style": "box", "show_headline": True}
     assert client.get("/api/clips", params={"streamer_id": 999}).json() == []
     assert client.get("/api/clips", params={"status": "nonsense"}).status_code == 400
     assert client.get(f"/media/clips/{clip['id']}.mp4").content == b"not really a video"
@@ -118,6 +119,24 @@ def test_headline_and_layout_changes_rerender(client, seeded):
     assert same["render_state"] == "ready"                         # nothing actually changed
     moved = client.put(f"/api/clips/{second}", json={"layout": {"type": "fill", "crop": [0.1, 0, 0.3, 1]}}).json()
     assert moved["render_state"] == "rendering" and moved["layout"]["crop"] == [0.1, 0.0, 0.3, 1.0]
+
+
+def test_caption_style_and_headline_switch_on_streamers_and_clips(client, seeded):
+    streamer = client.post("/api/streamers", json=_streamer_body(channel_url="https://youtube.com/@Someone",
+                                                                 caption_style="bold", show_headline=False)).json()
+    assert streamer["caption_style"] == "bold" and streamer["show_headline"] is False
+    assert worker.streamer_layout(db.get("streamers", streamer["id"])) == {
+        "type": "fill", "crop": None, "facecam": None, "gameplay": None, "caption_style": "bold", "show_headline": False}
+    assert client.put(f"/api/streamers/{streamer['id']}", json={"caption_style": "comic"}).status_code == 422
+
+    clip_id = seeded["clips"][0]
+    before = client.get(f"/api/clips/{clip_id}").json()["layout"]
+    assert before["caption_style"] == "box" and before["show_headline"] is True       # defaults for older clips
+    after = client.put(f"/api/clips/{clip_id}", json={"layout": {**before, "caption_style": "bold",
+                                                                 "show_headline": False}}).json()
+    assert after["layout"]["caption_style"] == "bold" and after["layout"]["show_headline"] is False
+    assert after["render_state"] == "rendering"
+    assert client.put(f"/api/clips/{clip_id}", json={"layout": {**before, "caption_style": "comic"}}).status_code == 422
 
 
 def test_clip_edit_validation(client, seeded):

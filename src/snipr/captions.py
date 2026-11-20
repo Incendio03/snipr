@@ -49,9 +49,26 @@ class Style:
     ink: tuple = (255, 255, 255, 255)
     plate: tuple = (10, 10, 15, 255)          # #0A0A0F
     accent: tuple = (124, 58, 237, 255)       # #7C3AED
+    # How the current word is marked: "box" puts it on an accent box, "color"
+    # keeps the outline and paints the word itself in the accent colour.
+    highlight: str = "box"
+    uppercase: bool = False
 
 
 STYLE = Style()
+
+# "box" is the Designer's spec. "bold" is the plain creator look: one or two
+# heavy capitals at a time, the spoken word in yellow, no box.
+STYLES: dict[str, Style] = {
+    "box": STYLE,
+    "bold": Style(caption_font="Montserrat-900.ttf", caption_size=104, caption_center_y=1400,
+                  caption_outline=12, caption_max_words=2, caption_gap=30, highlight="color",
+                  uppercase=True, accent=(255, 214, 10, 255)),
+}
+
+
+def get_style(name: str | None) -> Style:
+    return STYLES.get(name or "box", STYLE)
 
 
 @lru_cache(maxsize=32)
@@ -180,7 +197,10 @@ def draw_caption(texts: list[str], active: int | None, style: Style = STYLE) -> 
     x = (FRAME_W - measure_line(texts, style, size)) / 2
     for index, text in enumerate(texts):
         width = font.getlength(text)
-        if index == active:
+        if index == active and style.highlight == "color":
+            draw.text((x, top), text, font=font, fill=style.accent,
+                      stroke_width=style.caption_outline, stroke_fill=style.plate)
+        elif index == active:
             draw.rounded_rectangle(
                 (x - style.box_pad_x, top - style.box_pad_y, x + width + style.box_pad_x,
                  top + text_h + style.box_pad_y),
@@ -275,6 +295,8 @@ def build_overlays(words: list, headline: str, clip_len: float, out_dir: Path,
         headline_xy = ((FRAME_W - plate.width) // 2, y)
 
     usable = FRAME_W - 2 * style.side_margin
+    if style.uppercase:
+        words = [[w[0], w[1], str(w[2]).upper()] for w in words]
     lines = group_words(words, style.caption_max_words, measure=lambda t: measure_line(t, style),
                         max_width=usable)
     states = caption_states(lines, clip_len)

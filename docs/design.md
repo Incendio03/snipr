@@ -10,7 +10,8 @@ Snipr is a personal tool that runs on your own PC. It watches a list of streamer
 
 **Goals (v1)**
 - Add any streamer by pasting their channel link
-- Process finished VODs, one source platform per streamer. Twitch comes first; YouTube and Kick follow in an order you set
+- Process finished VODs, one source platform per streamer. Twitch and YouTube are built; Kick follows
+- Limit a streamer to chosen games, so only streams (or parts of streams) in those games are processed
 - Three selection modes per streamer: highlights, informative, custom
 - Produce captioned vertical (9:16) clips with an on-screen headline and a generated title, description and hashtags
 - Hold every clip in an approval queue, approved one at a time
@@ -58,6 +59,7 @@ Streamers are managed from the local web page, not from a config file. Any strea
 | Platform | Dropdown: Twitch, YouTube, Kick | Filled in automatically from the link, can be changed. Only platforms whose ingest is built are selectable |
 | Mode | Dropdown: Highlights, Informative, Custom | See section 5 |
 | Instructions | Text box | Required for Custom, optional for Informative |
+| Games | Text, comma separated | Optional. Only streams, or parts of streams, in these games are processed. See section 5 |
 | Max clips per VOD | Number | Default 5 |
 | Clip length | Min and max seconds | Default 20 to 60 |
 | Layout | Dropdown: Fill frame, Stacked | Default Fill frame. See section 6 |
@@ -76,6 +78,27 @@ Language is stored per streamer and is fixed to English in v1.
 | Highlights | Hype, funny or high-energy moments | Chat spikes, audio energy, then an LLM pass |
 | Informative | Self-contained explanations | Transcript, LLM |
 | Custom | Whatever you describe in your own words | Transcript, LLM, your instructions |
+
+### Game filter
+
+A streamer can be limited to one or more games, for example "GTA 6". The filter runs before anything is downloaded and stacks with the selection mode: it decides what gets processed, the mode decides which moments are picked.
+
+| Platform | How a stream is matched | Mixed streams |
+|---|---|---|
+| Twitch | Twitch marks the points where the streamer changes game. Each marked stretch is matched by name | Only the matching stretches are transcribed and clipped |
+| YouTube | Stream replays carry no game markers, so the stream title is matched | The whole stream is processed when the title matches |
+
+A stream with no match is skipped and logged on the Activity page. Names are matched loosely: "GTA 6" matches "Grand Theft Auto VI".
+
+### What each platform provides
+
+Checked against real channels on 2026-11-20.
+
+| | Twitch | YouTube |
+|---|---|---|
+| Game markers | Yes | No |
+| Chat replay | Yes | No |
+| Highlights mode runs on | Chat and loudness spikes, then the LLM | Loudness spikes, then the LLM |
 
 ### How many clips per VOD
 
@@ -146,7 +169,9 @@ Until a crop rectangle is marked, Fill frame uses a centre crop. The layout can 
 
 **Spoken captions.** Word-by-word captions of what the streamer says, in the lower third, with the current word highlighted in the purple accent. There is one fixed style in v1. The Designer sets its exact look.
 
-**Source quality.** VODs are downloaded at 1080p, because a 9:16 crop from 720p looks soft on a phone. Snipr checks free disk space before each download.
+**Source footage.** Snipr does not download the whole VOD. It downloads only the audio for analysis, then fetches the picture for each chosen clip at 1080p with 20 seconds of padding on each side. A 24 hour stream needs about 1 GB instead of tens of GB. The padding is what lets a clip be extended in review; moving a cut beyond it triggers another short download. Each fetched piece is lined up with the analysis audio by its sound, so cuts and captions are frame-exact. Snipr checks free disk space before processing a stream.
+
+**Stacked proportions.** The facecam takes the top 1080 x 608 and the gameplay the bottom 1080 x 1312. In this layout the headline sits centred on the seam between them so it never covers the face. Crop rectangles are locked to the shape of their slot while being marked.
 
 ## 7. Review
 
@@ -158,7 +183,11 @@ The approval queue lives on the local web page. Every clip is approved or reject
 
 Each clip shows its score, the LLM's reason for picking it, and any content flags.
 
-**Source retention.** The source VOD is kept until every clip from it has been approved or rejected, so a clip can still be extended in review. It is deleted after that, or when it reaches a maximum age.
+**Source retention.** The audio and the padded footage for each clip are kept until every clip from the stream has been approved or rejected, so a clip can still be extended in review. They are deleted after that, or when they reach a maximum age. Transcripts are kept, which is what makes "test on last VOD" possible later.
+
+**Keyboard.** A approves, E edits, R rejects, and the arrow keys move through the queue. "Approve and post now" sits next to Approve. After an approve or reject there is a brief undo.
+
+**Sample frame for marking crops.** The add-streamer form takes one frame from the channel's latest finished stream. A channel with no finished stream yet can still be added and uses the centre crop until a frame exists.
 
 **Alerts.** Snipr shows one Windows notification per processed VOD, with the number of clips waiting for review.
 
@@ -203,10 +232,10 @@ Export comes first so that publishing never depends on a platform approving an A
 | Stage | Responsibility | Tools |
 |---|---|---|
 | Scheduler | Poll enabled streamers for new VODs, enqueue jobs, hold heavy jobs for the processing window, release posts on their slots | APScheduler |
-| Ingest | Check disk space, download the VOD at 1080p and the chat log | `yt-dlp`, `streamlink`, a chat downloader |
-| Analyze | Produce a timestamped transcript with word timings, chat message rate and audio loudness curve | `faster-whisper`, `ffmpeg`, `librosa` |
+| Ingest | Apply the game filter, check disk space, download the audio and the Twitch chat replay; later fetch the footage for each clip | `yt-dlp`, Twitch's chat replay endpoint |
+| Analyze | Produce a timestamped transcript with word timings, chat message rate and audio loudness curve | `faster-whisper`, `ffmpeg`, `numpy` |
 | Select | Pick candidate segments with start/end times, a reason, a score and content flags | Scoring function, Claude via the Anthropic API |
-| Produce | Cut, reframe to 9:16, burn in headline and captions, write metadata | `ffmpeg` with NVENC, Claude |
+| Produce | Cut, reframe to 9:16, burn in headline and captions, write metadata | `ffmpeg` with NVENC, Pillow for the text, Claude |
 | Review | Show candidates, collect approve / edit / reject, choose destinations, notify | Local web page, Windows notifications |
 | Publish | Export for manual upload, or upload through the API, and record the post URL | YouTube Data API, TikTok Content Posting API, Facebook Graph API |
 
@@ -228,7 +257,7 @@ Export comes first so that publishing never depends on a platform approving an A
 | Video encoding | `ffmpeg` with `h264_nvenc` | Uses the GPU encoder, much faster than CPU encoding |
 | Concurrency | One GPU job at a time | Transcription and encoding should not compete for VRAM |
 
-Measure transcription speed in milestone 1 before settling on a model size, and confirm that a typical VOD finishes inside the processing window.
+**Measured in milestone 1:** `medium` at `int8_float16` transcribes about 30 times faster than real time on this GPU (12 minutes of audio in 24 seconds), so a 3 hour stream takes about 6 minutes and a 24 hour stream under an hour. A one minute clip renders in about 40 seconds. A typical stream finishes well inside the processing window, so `medium` stays.
 
 Because Snipr runs on a personal PC, the scheduler starts with Windows and catches up on any VODs published while the PC was off. Twitch deletes VODs after a retention period, so a long gap can mean missed streams.
 
@@ -319,7 +348,7 @@ storage:
 | 4 | Database, streamer form, approval queue with edit and reject reasons, notifications | You can add a streamer by link and approve, edit or reject each clip |
 | 5 | Destinations with a posting method each, posting slots, export with reminders, then YouTube API upload | An approved clip triggers a reminder at its slot and can be marked as posted; after switching the destination to API upload it appears on the chosen YouTube account |
 | 6 | Scheduler, processing window, retries | New VODs are processed with no manual step |
-| 7 | YouTube and Kick ingest, in the order you set | A streamer on each platform produces clips |
+| 7 | Kick ingest (YouTube ingest was built with milestone 1) | A Kick streamer produces clips |
 | 8 | TikTok and Facebook API upload | Same flow works on all three platforms |
 
 ## 16. Risks
@@ -346,7 +375,9 @@ storage:
 
 | Area | First draft | Now |
 |---|---|---|
-| Platforms | Twitch, YouTube and Kick with no order | Twitch first, others in milestone 7 in your order |
+| Platforms | Twitch, YouTube and Kick with no order | Twitch and YouTube built together, Kick in milestone 7 |
+| Game filter | None | Per streamer; skips streams and parts of streams in other games |
+| Download | Whole VOD at 1080p | Audio for analysis, then padded 1080p footage per clip |
 | Highlights | Chat and audio spikes only | Spikes nominate, an LLM pass filters and trims |
 | Reframing | "Reframe to 9:16", unspecified | Fill frame from a marked crop by default, Stacked opt-in |
 | On-screen text | Captions | Headline plus word-by-word spoken captions |

@@ -40,7 +40,9 @@ def poll_streamer(streamer: dict) -> int:
     channel = platforms.parse_channel(streamer["channel_url"])
     listed = platforms.list_vods(channel, limit=5)
     known = {r["vod_key"] for r in db.rows("SELECT vod_key FROM vods WHERE streamer_id = ?", (streamer["id"],))}
-    first_time = not known
+    # "Never checked" is the test, not "no streams recorded": a stream added by
+    # hand before the first check must not turn the rest into a backlog.
+    first_time = streamer["last_checked_at"] is None
     queued = 0
     fresh = [v for v in listed if v.vod_id not in known]
     for position, vod in enumerate(fresh):

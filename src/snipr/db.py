@@ -32,6 +32,8 @@ CREATE TABLE IF NOT EXISTS streamers (
     crop_rect TEXT,
     facecam_rect TEXT,
     gameplay_rect TEXT,
+    caption_style TEXT NOT NULL DEFAULT 'box',
+    show_headline INTEGER NOT NULL DEFAULT 1,
     default_destination_id INTEGER,
     enabled INTEGER NOT NULL DEFAULT 1,
     sample_frame TEXT,
@@ -186,10 +188,21 @@ def connect() -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+# Columns added after the first release. An existing database gets them on start.
+ADDED_COLUMNS = [
+    ("streamers", "caption_style", "TEXT NOT NULL DEFAULT 'box'"),
+    ("streamers", "show_headline", "INTEGER NOT NULL DEFAULT 1"),
+]
+
+
 def init() -> None:
     with connect() as conn:
         conn.execute("PRAGMA journal_mode = WAL")
         conn.executescript(SCHEMA)
+        for table, column, ddl in ADDED_COLUMNS:
+            present = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+            if column not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
 
 
 def _decode(row: sqlite3.Row) -> dict:

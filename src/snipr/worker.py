@@ -99,7 +99,9 @@ def _vod_info(vod: dict) -> VodInfo:
 
 def streamer_layout(streamer: dict) -> dict:
     return {"type": streamer["layout"], "crop": streamer["crop_rect"],
-            "facecam": streamer["facecam_rect"], "gameplay": streamer["gameplay_rect"]}
+            "facecam": streamer["facecam_rect"], "gameplay": streamer["gameplay_rect"],
+            "caption_style": streamer.get("caption_style") or "box",
+            "show_headline": bool(streamer.get("show_headline", 1))}
 
 
 def credit_line(streamer: dict) -> str:
