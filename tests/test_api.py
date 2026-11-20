@@ -61,7 +61,7 @@ def test_streamer_validation_messages(client):
 
     assert "instructions" in detail(mode="custom")
     assert "shortest" in detail(clip_min_s=90, clip_max_s=60)
-    assert "both rectangles" in detail(layout="stacked")
+    assert "Get sample frame" in detail(layout="stacked")          # says what to do, not only the rule
     assert "inside the frame" in detail(crop_rect=[0.8, 0, 0.5, 1])
     assert "not supported yet" in detail(channel_url="https://kick.com/someone")
     assert "Mode" in detail(mode="sideways")
@@ -198,7 +198,7 @@ def test_clip_edit_validation(client, seeded):
     assert "after the start" in detail({"start_s": 8090.0, "end_s": 8048.0})
     assert "20 to 60 seconds" in detail({"start_s": 8048.0, "end_s": 8200.0})
     assert "inside the stream" in detail({"start_s": 8990.0, "end_s": 9030.0})
-    assert "both rectangles" in detail({"layout": {"type": "stacked"}})
+    assert "Get sample frame" in detail({"layout": {"type": "stacked"}})
     assert client.put("/api/clips/9999", json={"title": "x"}).status_code == 404
 
 

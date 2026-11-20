@@ -32,6 +32,9 @@ MODES = ("highlights", "informative", "custom")
 LAYOUTS = ("fill", "stacked")
 CAPTION_STYLES = ("box", "bold")
 MIXES = ("duck", "mute")
+STACKED_NEEDS_BOXES = ("Stacked puts the facecam above the gameplay, so Snipr needs to know where each one is. "
+                       "Click \"Get sample frame\", then drag one box over the facecam and the other over the "
+                       "gameplay. Or switch Layout to Fill frame, which needs nothing marked.")
 LAYOUT_DEFAULTS = {"type": "fill", "crop": None, "facecam": None, "gameplay": None,
                    "caption_style": "box", "show_headline": True,
                    "voiceover": False, "voice": voice.DEFAULT_VOICE, "mix": "duck"}
@@ -273,7 +276,7 @@ def _streamer_fields(body: dict, current: dict | None) -> dict:
     if merged["clip_min_s"] > merged["clip_max_s"]:
         raise bad("The shortest clip length cannot be longer than the longest.")
     if merged["layout"] == "stacked" and not (merged["facecam_rect"] and merged["gameplay_rect"]):
-        raise bad("Stacked layout needs both rectangles marked: the facecam and the gameplay.")
+        raise bad(STACKED_NEEDS_BOXES)
     return out
 
 
@@ -492,7 +495,7 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
                       "voiceover": bool(layout.get("voiceover", current_layout["voiceover"])),
                       "voice": speaker, "mix": mix}
         if new_layout["type"] == "stacked" and not (new_layout["facecam"] and new_layout["gameplay"]):
-            raise bad("Stacked layout needs both rectangles marked: the facecam and the gameplay.")
+            raise bad(STACKED_NEEDS_BOXES)
         values["layout"] = new_layout
 
     final_layout = values.get("layout", current_layout)
