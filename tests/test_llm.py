@@ -100,6 +100,36 @@ def test_highlights_prompt_shows_only_the_transcript_around_each_nomination():
     assert "OBS" not in prompt                      # the far-away part of the stream is left out
 
 
+HISTORY = [
+    {"verdict": "approved", "reason": None, "title": "Five stars in a minute", "summary": "The wanted level climbs fast."},
+    {"verdict": "rejected", "reason": "boring", "title": "Menu tour", "summary": "He scrolls through settings."},
+    {"verdict": "rejected", "reason": "bad_cut", "title": "The heist", "summary": "Starts mid-sentence."},
+    {"verdict": "rejected", "reason": "bad_framing", "title": "Crop problem", "summary": "Face cut off."},
+]
+
+
+def test_review_history_reaches_the_prompt_in_every_mode():
+    from snipr.scoring import Window
+
+    request = _request()
+    request.history = HISTORY
+    for prompt in (llm.build_select_prompt(request, None),
+                   llm.build_select_prompt(request, [Window(395.0, 425.0, 0.9, 6.0, 3.0, 5.0)])):
+        assert "<reviewer_history>" in prompt and "Approved:" in prompt and "Rejected:" in prompt
+        assert "- Five stars in a minute: The wanted level climbs fast." in prompt
+        assert "- Menu tour (they found it boring): He scrolls through settings." in prompt
+        assert "started or ended in the wrong place" in prompt
+        assert "Crop problem" not in prompt             # framing is about the crop, not the pick
+
+
+def test_no_history_means_no_history_block():
+    assert llm.history_block(None) == "" and llm.history_block([]) == ""
+    assert llm.history_block([HISTORY[3]]) == ""        # only a framing rejection: nothing to learn from
+    assert "<reviewer_history>" not in llm.build_select_prompt(_request(), None)
+    only_approved = llm.history_block([HISTORY[0]])
+    assert "Approved:" in only_approved and "Rejected:" not in only_approved
+
+
 def test_select_segments_sends_schema_model_and_returns_raw_segments():
     answer = {"segments": [{"start": 100.0, "end": 131.0, "score": 0.8, "title": "OBS scenes",
                             "reason": "Complete how-to.", "flags": []}]}

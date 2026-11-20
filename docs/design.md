@@ -198,7 +198,9 @@ The approval queue lives on the local web page. Every clip is approved or reject
 
 - **Approve:** the clip is queued for each chosen destination (see section 8).
 - **Edit:** start and end, headline, title, description, hashtags, layout and destinations. Changing start, end or layout re-renders the clip.
-- **Reject:** offers optional one-click reasons: boring, bad cut, wrong topic, bad framing, other. Reasons are logged per streamer and used to tune selection.
+- **Reject:** offers optional one-click reasons: boring, bad cut, wrong topic, bad framing, other.
+
+**How review decisions feed back.** Each time a stream is processed, the LLM is shown the streamer's latest approved clips and latest rejected clips with their reasons (up to eight of each), and told to lean toward the first kind and away from the second. "Bad cut" tells it to take more care over where clips start and end. "Bad framing" is left out, because it is about the crop and not about which moment was picked. This is steering by example, not training: it applies from the next stream processed, only per streamer, only when an API key is stored, and a strong moment can still be picked even if it resembles a rejected one. Without the LLM, decisions are recorded but nothing uses them.
 
 Each clip shows its score, the LLM's reason for picking it, and any content flags.
 

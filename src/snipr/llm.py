@@ -163,12 +163,56 @@ def _signals_block(req: "selection.SelectionRequest") -> str:
     return "\n".join(rows)
 
 
+REASON_NOTES = {
+    "boring": "they found it boring",
+    "wrong_topic": "not the kind of moment they want from this streamer",
+    "bad_cut": "the moment was fine but the clip started or ended in the wrong place",
+    "other": "no reason given",
+    None: "no reason given",
+}
+
+
+def history_block(history: list[dict] | None) -> str:
+    """Earlier review decisions as guidance for the next selection, or "" when there are none.
+
+    This is how the reviewer's taste carries over: the model sees what they
+    kept and what they turned down, and why. Rejections for bad framing are
+    left out because they are about the crop, not about which moment was picked.
+    """
+    kept = [h for h in history or [] if h.get("verdict") == "approved"][:8]
+    dropped = [h for h in history or [] if h.get("verdict") == "rejected" and h.get("reason") != "bad_framing"][:8]
+    if not kept and not dropped:
+        return ""
+
+    def line(item: dict, with_reason: bool) -> str:
+        title = " ".join(str(item.get("title") or "untitled").split())[:90]
+        summary = " ".join(str(item.get("summary") or "").split())[:220]
+        note = f" ({REASON_NOTES.get(item.get('reason'), 'no reason given')})" if with_reason else ""
+        return f"- {title}{note}" + (f": {summary}" if summary else "")
+
+    parts = ["<reviewer_history>",
+             "The person who reviews these clips has already approved and rejected earlier picks from this "
+             "streamer. Lean toward the kind of moment they approve and away from the kind they reject, and "
+             "score accordingly. Treat this as their taste, not as rules: a strong moment is still worth "
+             "returning even if it resembles something they once turned down. Where a rejection says the cut "
+             "was wrong, take extra care that your segments start at the setup and end right after the payoff."]
+    if kept:
+        parts += ["Approved:"] + [line(h, False) for h in kept]
+    if dropped:
+        parts += ["Rejected:"] + [line(h, True) for h in dropped]
+    parts.append("</reviewer_history>")
+    return "\n".join(parts)
+
+
 def build_select_prompt(req: "selection.SelectionRequest", nominated: list | None) -> str:
     """The user message for one selection request."""
     segments = req.transcript.get("segments", [])
     limits = (f"Each clip must be between {req.clip_min_s:.0f} and {req.clip_max_s:.0f} seconds long. "
               f"Return at most {req.max_clips} segments.")
     header = f"Streamer: {req.streamer or 'unknown'}\nStream title: {req.vod_title or 'unknown'}\n"
+    taste = history_block(req.history)
+    if taste:
+        limits = limits + "\n\n" + taste
 
     if nominated is not None:
         parts = [header,

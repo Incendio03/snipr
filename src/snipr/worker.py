@@ -112,9 +112,27 @@ def credit_line(streamer: dict) -> str:
     return f"Credit: {streamer['name']}, {link}"
 
 
+def review_history(streamer_id: int, limit: int = 8) -> list[dict]:
+    """The reviewer's latest approvals and rejections for a streamer, newest first.
+
+    Given to the LLM with the next stream so selection follows what the
+    reviewer has been keeping and turning down.
+    """
+    history: list[dict] = []
+    for verdict in ("approved", "rejected"):
+        found = db.rows(
+            "SELECT c.title, c.working_title, c.description, c.reject_reason FROM clips c "
+            "JOIN vods v ON v.id = c.vod_id WHERE v.streamer_id = ? AND c.status = ? "
+            "ORDER BY c.reviewed_at DESC, c.id DESC LIMIT ?", (streamer_id, verdict, limit))
+        history += [{"verdict": verdict, "reason": r["reject_reason"],
+                     "title": r["working_title"] or r["title"], "summary": r["description"]} for r in found]
+    return history
+
+
 def build_request(streamer: dict, vod: dict, analysis, settings: dict) -> selection.SelectionRequest:
     sel = settings["selection"]
     return selection.SelectionRequest(
+        history=review_history(streamer["id"]),
         mode=streamer["mode"], instructions=streamer["instructions"],
         max_clips=int(streamer["max_clips_per_vod"]), clip_min_s=float(streamer["clip_min_s"]),
         clip_max_s=float(streamer["clip_max_s"]), min_score=float(sel["min_score"]),

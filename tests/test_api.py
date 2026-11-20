@@ -224,6 +224,20 @@ def test_approve_schedules_posts_and_reject_and_restore_clean_up(client, seeded)
     assert [c["id"] for c in client.get("/api/clips", params={"status": "rejected"}).json()] == [second]
 
 
+def test_review_decisions_become_history_for_the_next_selection(client, seeded):
+    first, second = seeded["clips"]
+    assert worker.review_history(seeded["streamer"]) == []          # nothing reviewed yet
+    client.post(f"/api/clips/{first}/approve", json={"destination_ids": []})
+    client.post(f"/api/clips/{second}/reject", json={"reason": "boring"})
+    history = worker.review_history(seeded["streamer"])
+    assert [(h["verdict"], h["reason"]) for h in history] == [("approved", None), ("rejected", "boring")]
+    assert history[0]["title"] == "Five stars" and history[0]["summary"] == "The wanted level climbs."
+    # Undoing a decision takes it back out, and another streamer's decisions never leak in.
+    client.post(f"/api/clips/{second}/restore")
+    assert [h["verdict"] for h in worker.review_history(seeded["streamer"])] == ["approved"]
+    assert worker.review_history(seeded["streamer"] + 1) == []
+
+
 def test_approving_with_no_destination_schedules_nothing(client, seeded):
     result = client.post(f"/api/clips/{seeded['clips'][0]}/approve", json={"destination_ids": []}).json()
     assert result["clip"]["status"] == "approved" and result["posts"] == []

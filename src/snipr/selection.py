@@ -53,6 +53,9 @@ class SelectionRequest:
     audio_weight: float = 0.4
     streamer: str = ""
     vod_title: str = ""
+    # Earlier review decisions for this streamer, newest first:
+    # {"verdict": "approved" | "rejected", "reason": str | None, "title": str, "summary": str}
+    history: list[dict] | None = None
 
 
 def _in_ranges(start: float, end: float, ranges: list[tuple[float, float]]) -> bool:
