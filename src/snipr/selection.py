@@ -69,6 +69,28 @@ def nominate_highlights(req: SelectionRequest) -> list[scoring.Window]:
     return scoring.nominate(windows, req.nominations, max_len_s=max(req.clip_max_s, 60.0))
 
 
+# The least talking a transcript-based pick must contain. An explanation is nearly
+# continuous speech (2 to 3 words a second); a Custom pick may be a reaction with pauses.
+# Measured case: a model picked 35 seconds holding 13 words (0.4 a second) as "informative".
+MIN_WORDS_PER_SECOND = {"informative": 0.9, "custom": 0.4}
+
+
+def words_per_second(transcript: dict, start: float, end: float) -> float:
+    """How densely a stretch of the stream is spoken, from the transcript's word timings."""
+    if end <= start:
+        return 0.0
+    words = 0
+    for seg in transcript.get("segments", []):
+        if seg["e"] < start or seg["s"] > end:
+            continue
+        timed = seg.get("w") or []
+        if timed:
+            words += sum(1 for w in timed if start <= (w[0] + w[1]) / 2 <= end)
+        elif start <= (seg["s"] + seg["e"]) / 2 <= end:
+            words += len(seg.get("t", "").split())          # a sentence without word timings
+    return words / (end - start)
+
+
 SPEECH_BEFORE_S = 60.0     # transcript kept before a nominated window: room for the setup
 SPEECH_AFTER_S = 45.0      # and after it: room for the payoff
 
@@ -140,6 +162,13 @@ def select(req: SelectionRequest, llm=None) -> list[Segment]:
         if req.mode == "custom" and not req.instructions.strip():
             raise ValueError("Custom mode needs instructions describing what to look for.")
         raw = llm.select_segments(req, None)
-        return scoring.validate_segments(raw, **common)
+        # A pick is checked against what was really said in it. A model reading hours of
+        # transcript sometimes describes one moment and gives the times of another; the
+        # giveaway is a segment with almost nobody talking. Those are dropped, and the
+        # next best picks take their place.
+        wide = scoring.validate_segments(raw, **{**common, "limit": req.max_clips * 5})
+        floor = MIN_WORDS_PER_SECOND[req.mode]
+        spoken = [s for s in wide if words_per_second(req.transcript, s.start, s.end) >= floor]
+        return spoken[: req.max_clips]
 
     raise ValueError(f"Unknown selection mode: {req.mode}")

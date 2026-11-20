@@ -75,6 +75,39 @@ def test_custom_needs_instructions_and_unknown_modes_are_rejected():
         selection.select(_request("sideways"), Never())
 
 
+def _talk(start, seconds, words_per_second):
+    """Sentences of evenly spaced words, with word timings, like a real transcript."""
+    words = [[start + i / words_per_second, start + (i + 0.8) / words_per_second, f"w{i}"]
+             for i in range(int(seconds * words_per_second))]
+    return [{"s": chunk[0][0], "e": chunk[-1][1], "t": " ".join(w[2] for w in chunk), "w": chunk}
+            for chunk in (words[i:i + 12] for i in range(0, len(words), 12))]
+
+
+def test_words_per_second_counts_what_is_spoken_inside_a_stretch():
+    transcript = {"segments": _talk(100, 40, 2.5) + [{"s": 500.0, "e": 502.0, "t": "are you a bot", "w": []}]}
+    assert 2.3 < selection.words_per_second(transcript, 100, 140) < 2.6
+    assert selection.words_per_second(transcript, 300, 340) == 0.0
+    assert selection.words_per_second(transcript, 495, 530) == 4 / 35          # untimed sentence counted by its words
+    assert selection.words_per_second(transcript, 10, 10) == 0.0
+
+
+def test_a_pick_with_almost_no_talking_is_replaced_by_the_next_best():
+    # The model's top pick points at 35 near-silent seconds; its second pick is a real explanation.
+    transcript = {"segments": _talk(1000, 45, 2.5) + [{"s": 300.0, "e": 302.0, "t": "bro are you a bot", "w": []}]}
+
+    class Model:
+        def select_segments(self, req, nominated):
+            return [{"start": 297.0, "end": 332.0, "score": 0.85, "title": "empty", "reason": "r", "flags": []},
+                    {"start": 1000.0, "end": 1040.0, "score": 0.7, "title": "explains", "reason": "r", "flags": []}]
+
+    picks = selection.select(_request("informative", transcript=transcript, max_clips=1, min_score=0.6), Model())
+    assert [p.title for p in picks] == ["explains"]
+    # Custom allows quieter moments (reactions), but not near-silence either.
+    custom = selection.select(_request("custom", instructions="reactions", transcript=transcript, max_clips=2,
+                                       min_score=0.6), Model())
+    assert [p.title for p in custom] == ["explains"]
+
+
 def test_per_minute_sums_chat_and_averages_loudness():
     chat = np.concatenate([np.full(60, 2.0), np.full(60, 5.0)])
     assert selection.per_minute(chat, 120.0, "chat") == [(2, 120.0), (3, 300.0)]

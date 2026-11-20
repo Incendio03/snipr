@@ -430,7 +430,10 @@ class GeminiProvider(Provider):
     several parts) and a "slow down" answer is waited out before giving up.
     """
 
-    max_transcript_tokens = 150_000
+    # About three and a half hours of a fast-talking stream per request. A first live run
+    # sent nine hours at a time to a Flash-Lite model and got back a pick whose stated
+    # reason did not match its timestamps; smaller parts keep the model anchored.
+    max_transcript_tokens = 60_000
     rate_limit_waits_s = (65, 65)            # pauses after a 429 before the request counts as failed
     unavailable_waits_s = (8, 25)            # pauses after a 500 or 503
     request_timeout_s = 600.0                # a long transcript can take minutes to answer
