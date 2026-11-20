@@ -321,6 +321,7 @@ export function mount(root, ctx) {
     // How to narrate: the reviewer's own directions, reusable as named templates.
     const style = h('textarea', { class: 'input', rows: '3', maxlength: '1500',
       placeholder: 'For example: hype sports commentator, short punchy sentences, end on a question for the viewer.' });
+    style.value = clip.narration_style ?? '';        // starts from the streamer's default style
     const templateSelect = h('select', { class: 'input' });
     const templateName = h('input', { type: 'text', class: 'input', maxlength: '60', placeholder: 'Template name' });
     const templateSave = h('button', { type: 'button', class: 'btn btn--small' }, 'Save as template');

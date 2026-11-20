@@ -135,7 +135,8 @@ def streamer_out(s: dict) -> dict:
         "layout": s["layout"], "crop_rect": s["crop_rect"], "facecam_rect": s["facecam_rect"],
         "gameplay_rect": s["gameplay_rect"], "caption_style": s["caption_style"],
         "show_headline": bool(s["show_headline"]), "voiceover": bool(s["voiceover"]), "voice": s["voice"],
-        "voiceover_mix": s["voiceover_mix"], "default_destination_id": s["default_destination_id"],
+        "voiceover_mix": s["voiceover_mix"], "narration_style": s["narration_style"],
+        "default_destination_id": s["default_destination_id"],
         "enabled": bool(s["enabled"]),
         "sample_frame": _frame_info(s["sample_frame"], s["sample_w"], s["sample_h"]),
         "stats": {"pending": counts.get("pending_review", 0), "approved": counts.get("approved", 0),
@@ -162,6 +163,7 @@ def clip_out(c: dict) -> dict:
         "mode": streamer["mode"], "reason": c["reason"], "flags": c["flags"], "layout": layout,
         "headline": c["headline"], "title": c["title"], "description": c["description"], "credit": c["credit"],
         "hashtags": c["hashtags"], "narration": c["narration"],
+        "narration_style": streamer["narration_style"],
         "status": "pending_review" if c["status"] == "candidate" else c["status"],
         "reject_reason": c["reject_reason"],
         "render_state": c["render_state"] if c["render_state"] != "ready" or ready else "failed",
@@ -243,7 +245,10 @@ def _streamer_fields(body: dict, current: dict | None) -> dict:
     for key in ("show_headline", "voiceover"):
         if key in body:
             out[key] = bool(body[key])
-    for key in ("name", "mode", "instructions", "games", "layout", "caption_style", "voice", "voiceover_mix"):
+    if isinstance(body.get("narration_style"), str) and len(body["narration_style"]) > 1500:
+        raise bad("The narration style is too long. Keep it under 1,500 characters.")
+    for key in ("name", "mode", "instructions", "games", "layout", "caption_style", "voice", "voiceover_mix",
+                "narration_style"):
         if key in body:
             if not isinstance(body[key], str):
                 raise bad(f"{key} must be text.")

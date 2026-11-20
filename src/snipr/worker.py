@@ -359,7 +359,8 @@ def process_vod(job: dict, settings: dict) -> None:
                     with_source = ensure_source(db.get("clips", clip_id), vod, analysis.audio_path, settings, step)
                     step("Writing narration", None)
                     try:
-                        script = write_narration(with_source, vod, streamer, analysis.transcript, provider)
+                        script = write_narration(with_source, vod, streamer, analysis.transcript, provider,
+                                                 instructions=streamer.get("narration_style") or "")
                         db.update("clips", clip_id, {"narration": script})
                     except llm.LLMError as exc:
                         db.event(f"The narration for a clip from \"{info.title}\" could not be written: {exc}",

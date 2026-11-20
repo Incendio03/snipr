@@ -164,6 +164,16 @@ def test_voiceover_settings_on_streamers(client):
     assert voices["default"] == "am_michael" and {"id": "bm_george", "label": "George (UK, male)"} in voices["voices"]
 
 
+def test_a_streamers_narration_style_is_saved_and_offered_on_their_clips(client, seeded):
+    sid = seeded["streamer"]
+    assert client.get("/api/streamers").json()[0]["narration_style"] == ""
+    saved = client.put(f"/api/streamers/{sid}", json={"narration_style": "  Hype sports commentator.  "}).json()
+    assert saved["narration_style"] == "Hype sports commentator."
+    assert client.get(f"/api/clips/{seeded['clips'][0]}").json()["narration_style"] == "Hype sports commentator."
+    assert client.put(f"/api/streamers/{sid}", json={"narration_style": "x" * 1501}).status_code == 422
+    assert client.put(f"/api/streamers/{sid}", json={"narration_style": ""}).json()["narration_style"] == ""
+
+
 def test_voiceover_on_a_clip_needs_a_narration_that_fits(client, seeded):
     clip_id = seeded["clips"][0]                                   # a 41 second clip
     layout = client.get(f"/api/clips/{clip_id}").json()["layout"]

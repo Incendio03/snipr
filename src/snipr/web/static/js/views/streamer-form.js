@@ -273,15 +273,36 @@ export function mount(root, ctx) {
       legendClass: 'label',
       onChange: (next) => { voice = next; paintVoice(); syncDirty(); },
     });
+    // The default narration style for this streamer: used for every narration Snipr writes
+    // by itself, and it pre-fills "How to narrate" when one of their clips is edited.
+    const narrationStyle = h('textarea', { class: 'input', rows: '3', maxlength: '1500', id: 's-narration-style',
+      placeholder: 'For example: hype sports commentator, short punchy sentences, end on a question for the viewer.' });
+    narrationStyle.value = streamer && streamer.narration_style ? streamer.narration_style : '';
+    const styleTemplates = h('select', { class: 'input' }, h('option', { value: '' }, 'Fill from a saved template'));
+    api.templates.list().then((list) => {
+      if (!alive) return;
+      for (const t of list ?? []) styleTemplates.append(h('option', { value: t.prompt }, t.name));
+      styleTemplates.hidden = !(list && list.length);
+    }, () => { styleTemplates.hidden = true; });
+    styleTemplates.addEventListener('change', () => {
+      if (styleTemplates.value) { narrationStyle.value = styleTemplates.value; syncDirty(); }
+      styleTemplates.value = '';
+    });
+    const styleBlock = h('div', { class: 'block', style: { gap: '8px' } },
+      h('label', { class: 'label', for: 's-narration-style' }, 'Narration style', h('span', { class: 'label__opt' }, ' · optional')),
+      narrationStyle,
+      styleTemplates,
+      h('span', { class: 'help' }, 'How narrations for this streamer should sound. Used for every narration Snipr writes by itself. You can still change it for a single clip when editing it. Templates are saved from the Edit clip screen.'));
     function paintVoice() {
       const state = ctx.state();
       voiceCtl.optionsEl.hidden = !voice.on;
+      styleBlock.hidden = !voice.on;
       voiceKeyNote.hidden = !(state && state.llm_ready === false);
     }
     stopState = ctx.onState(() => { if (alive) paintVoice(); });
     const voiceSet = h('fieldset', { class: 'fieldset', style: { gap: '12px' } },
       h('legend', { class: 'label' }, 'Voiceover'),
-      voiceCtl.toggleEl, voiceKeyNote, voiceCtl.optionsEl);
+      voiceCtl.toggleEl, voiceKeyNote, voiceCtl.optionsEl, styleBlock);
 
     frameBtn.addEventListener('click', async () => {
       const url = link.value.trim();
@@ -390,6 +411,7 @@ export function mount(root, ctx) {
         show_headline: showHeadline,
         voiceover: voice.on,
         voiceover_mix: voice.mix,
+        narration_style: narrationStyle.value.trim(),
         crop_rect: rects.crop,
         facecam_rect: shown('facecam'),
         gameplay_rect: shown('gameplay'),

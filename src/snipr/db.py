@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS streamers (
     facecam_rect TEXT,
     gameplay_rect TEXT,
     caption_style TEXT NOT NULL DEFAULT 'box',
+    narration_style TEXT NOT NULL DEFAULT '',
     show_headline INTEGER NOT NULL DEFAULT 1,
     default_destination_id INTEGER,
     enabled INTEGER NOT NULL DEFAULT 1,
@@ -203,6 +204,7 @@ ADDED_COLUMNS = [
     ("streamers", "voice", "TEXT NOT NULL DEFAULT 'am_michael'"),
     ("streamers", "voiceover_mix", "TEXT NOT NULL DEFAULT 'duck'"),
     ("clips", "narration", "TEXT NOT NULL DEFAULT ''"),
+    ("streamers", "narration_style", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 
