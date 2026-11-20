@@ -167,6 +167,10 @@ export function mount(root, ctx) {
       action = h('button', { type: 'button', class: 'btn', disabled: busy, 'data-key': `retry-${job.id}`, onclick: () => jobAction(job, api.activity.retryJob, 'Queued to run again.') }, 'Retry');
     }
     const retrying = job.status === 'running' && (job.attempts ?? 1) > 1;
+    // Anything not running right now can be taken off the list. A cancelled stream is not picked up again.
+    const cancel = ['waiting', 'queued', 'failed'].includes(job.status)
+      ? h('button', { type: 'button', class: 'btn btn--text', disabled: busy, 'data-key': `cancel-${job.id}`, onclick: () => jobAction(job, api.activity.cancelJob, 'Cancelled. This stream will not be picked up again.') }, 'Cancel')
+      : null;
 
     return h('div', { class: `table__item table__row jobs-grid job job--${job.status}`, role: 'row' },
       h('div', { class: 'cell-2', role: 'cell', style: { gap: '3px' } },
@@ -185,7 +189,7 @@ export function mount(root, ctx) {
             : busyBar(job.stage || 'Working'))
           : null,
         note.text ? h('span', { class: `job__note ${note.cls}` }, note.text) : null),
-      h('div', { role: 'cell', style: { display: 'flex', justifyContent: 'flex-end' } }, action));
+      h('div', { role: 'cell', style: { display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '8px' } }, cancel, action));
   }
 
   async function jobAction(job, call, doneText) {

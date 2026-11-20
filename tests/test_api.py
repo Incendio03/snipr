@@ -335,6 +335,46 @@ def test_failed_jobs_retry_then_stop_and_can_be_retried_by_hand(client, seeded, 
     assert retried["status"] == "queued" and retried["attempts"] == 0 and retried["error"] is None
 
 
+def test_a_lost_connection_does_not_use_up_attempts(data_dir, seeded, monkeypatch):
+    def explode(job, settings):
+        raise RuntimeError("getaddrinfo failed")
+
+    monkeypatch.setitem(worker.HANDLERS, "process_vod", explode)
+    monkeypatch.setattr(worker, "is_online", lambda: False)
+    settings = __import__("snipr.config", fromlist=["x"]).load_settings()
+    job_id = worker.enqueue("process_vod", seeded["vod"], "pixelmoth: GTA 6 day 2", force=True)
+    for _ in range(6):                                            # far more tries than the retry limit
+        db.update("jobs", job_id, {"run_after": None})
+        worker.run_job(db.get("jobs", job_id), settings)
+    job = db.get("jobs", job_id)
+    assert job["status"] == "queued" and job["attempts"] == 0 and job["error"] == worker.OFFLINE_MESSAGE
+    assert job["run_after"] is not None and job["stage"] == "Waiting for the internet"
+    assert db.scalar("SELECT COUNT(*) FROM events WHERE message LIKE 'No internet connection%'") == 1   # said once
+
+    monkeypatch.setattr(worker, "is_online", lambda: True)        # back online: failures count again
+    db.update("jobs", job_id, {"run_after": None})
+    worker.run_job(db.get("jobs", job_id), settings)
+    assert db.get("jobs", job_id)["attempts"] == 1
+
+
+def test_cancelling_a_job_removes_it_and_the_stream_is_not_queued_again(client, seeded):
+    job_id = worker.enqueue("process_vod", seeded["vod"], "pixelmoth: GTA 6 day 2")
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 204
+    assert db.get("jobs", job_id) is None and db.get("vods", seeded["vod"])["status"] == "ignored"
+    assert client.get("/api/activity").json()["jobs"] == []
+    assert client.post(f"/api/jobs/{job_id}/cancel").status_code == 404
+
+    running = worker.enqueue("process_vod", seeded["vod"], "x")
+    db.update("jobs", running, {"status": "running"})
+    blocked = client.post(f"/api/jobs/{running}/cancel")
+    assert blocked.status_code == 409 and "running right now" in blocked.json()["detail"]
+
+    render = worker.enqueue("render_clip", seeded["clips"][0], "Re-render")
+    assert client.post(f"/api/jobs/{render}/cancel").status_code == 204
+    clip = client.get(f"/api/clips/{seeded['clips'][0]}").json()
+    assert clip["render_state"] == "failed" and "cancelled" in clip["render_error"]
+
+
 def test_a_permanent_failure_is_not_retried(data_dir, seeded, monkeypatch):
     def explode(job, settings):
         raise worker.Permanent("Custom mode needs an API key.")

@@ -107,6 +107,7 @@ export const api = {
     get: () => get('/api/activity'),
     retryJob: (id) => post(`/api/jobs/${id}/retry`),
     runJobNow: (id) => post(`/api/jobs/${id}/run-now`),
+    cancelJob: (id) => post(`/api/jobs/${id}/cancel`),
     runNow: () => post('/api/run-now'),
     processVod: (url, streamerId) => post('/api/vods', { url, streamer_id: streamerId }),
   },

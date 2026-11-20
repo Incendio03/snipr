@@ -69,6 +69,22 @@ def nominate_highlights(req: SelectionRequest) -> list[scoring.Window]:
     return scoring.nominate(windows, req.nominations, max_len_s=max(req.clip_max_s, 60.0))
 
 
+SPEECH_BEFORE_S = 60.0     # transcript kept before a nominated window: room for the setup
+SPEECH_AFTER_S = 45.0      # and after it: room for the payoff
+
+
+def speech_ranges(nominated: list[scoring.Window], duration: float) -> list[tuple[float, float]]:
+    """The stretches of a stream worth transcribing for Highlights: around each nominated window."""
+    padded = [(max(0.0, w.start - SPEECH_BEFORE_S), min(duration, w.end + SPEECH_AFTER_S)) for w in nominated]
+    merged: list[tuple[float, float]] = []
+    for lo, hi in sorted(padded):
+        if merged and lo <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
 def per_minute(curve: np.ndarray | None, span_start: float, kind: str) -> list[tuple[int, float]]:
     """(VOD minute, value) pairs: messages per minute for chat, mean dBFS for loudness."""
     if curve is None or len(curve) == 0:

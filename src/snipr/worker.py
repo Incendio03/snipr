@@ -26,8 +26,25 @@ STAGE_LABELS = {"download audio": "Downloading audio", "loudness": "Measuring lo
                 "chat": "Reading chat replay", "transcribe": "Transcribing"}
 
 
+OFFLINE_MESSAGE = "No internet connection. Trying again every couple of minutes."
+OFFLINE_RETRY_S = 120
+
+
 class Permanent(Exception):
     """A failure that retrying cannot fix. The job stops at once with this message."""
+
+
+def is_online() -> bool:
+    """Can this PC reach the internet right now? Checked only after a job has failed."""
+    import socket
+
+    for host in ("www.youtube.com", "www.twitch.tv", "one.one.one.one"):
+        try:
+            socket.create_connection((host, 443), timeout=4).close()
+            return True
+        except OSError:
+            continue
+    return False
 
 
 # --------------------------------------------------------------------------- queue
@@ -141,6 +158,26 @@ def build_request(streamer: dict, vod: dict, analysis, settings: dict) -> select
         nominations=int(sel["highlight_nominations"]), window_s=int(sel["window_s"]), step_s=int(sel["step_s"]),
         chat_weight=float(sel["chat_weight"]), audio_weight=float(sel["audio_weight"]),
         streamer=streamer["name"], vod_title=vod["title"])
+
+
+def analyze_for(streamer: dict, vod: dict, info: VodInfo, ranges: list, settings: dict, progress=None):
+    """Analyse a stream the cheapest way its mode allows.
+
+    Informative and Custom read everything, so everything is transcribed.
+    Highlights only ever looks at the transcript around its spikes, so the
+    spikes are found first from chat and loudness and only those stretches are
+    transcribed.
+    """
+    progress = progress or (lambda stage, fraction: None)
+    if streamer["mode"] != "highlights":
+        return pipeline.analyze(info, ranges, settings, progress)
+    signals = pipeline.analyze(info, ranges, settings, progress, transcribe_speech=False)
+    nominated = selection.nominate_highlights(build_request(streamer, {**vod, "duration": info.duration},
+                                                            signals, settings))
+    if not nominated:
+        return signals
+    return pipeline.analyze(info, ranges, settings, progress,
+                            speech_ranges=selection.speech_ranges(nominated, info.duration))
 
 
 def _free_gb() -> float:
@@ -259,7 +296,7 @@ def process_vod(job: dict, settings: dict) -> None:
     if _free_gb() < MIN_FREE_GB:
         raise RuntimeError(f"Less than {MIN_FREE_GB:.0f} GB is free on the data drive. Free up space to continue.")
 
-    analysis = pipeline.analyze(info, ranges, settings, progress)
+    analysis = analyze_for(streamer, vod, info, ranges, settings, progress)
     transcribe.release_models()                   # free the GPU before encoding
     db.update("vods", vod["id"], {"ranges": [list(r) for r in analysis.ranges], "span_start": analysis.span[0],
                                   "audio_path": str(analysis.audio_path), "stats": analysis.stats})
@@ -368,6 +405,17 @@ def run_job(job: dict, settings: dict) -> None:
         permanent = isinstance(exc, Permanent)
         message = _short(exc)
         (config.data_dir() / "last_error.log").write_text(traceback.format_exc(), encoding="utf-8")
+        if not permanent and not is_online():
+            # The connection is down, which is nobody's fault and fixes itself. Wait it out
+            # without using up an attempt, instead of failing after three quick tries.
+            retry_at = (datetime.now() + timedelta(seconds=OFFLINE_RETRY_S)).replace(microsecond=0).isoformat()
+            if job["error"] != OFFLINE_MESSAGE:
+                db.event(f"No internet connection. {job['label'] or job['kind']} will continue when it is back.",
+                         "warn")
+            db.update("jobs", job["id"], {"status": "queued", "error": OFFLINE_MESSAGE, "run_after": retry_at,
+                                          "stage": "Waiting for the internet", "progress": None,
+                                          "updated_at": db.now()})
+            return
         if permanent or attempts >= limit:
             db.update("jobs", job["id"], {"status": "failed", "attempts": attempts, "error": message,
                                           "progress": None, "updated_at": db.now()})

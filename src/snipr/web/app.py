@@ -773,6 +773,26 @@ def run_job_now(job_id: int) -> dict:
     return worker.job_view(db.get("jobs", job_id), config.load_settings())
 
 
+@app.post("/api/jobs/{job_id}/cancel", status_code=204)
+def cancel_job(job_id: int) -> Response:
+    """Take a job that is not running off the list, for good."""
+    job = _need("jobs", job_id, "job")
+    if job["status"] == "running":
+        raise bad("This job is running right now. It can be cancelled once it stops.", 409)
+    if job["status"] == "done":
+        raise bad("This job has already finished.", 409)
+    db.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
+    if job["kind"] == "process_vod":
+        # "ignored" keeps the scheduler from queueing the same stream again on its next check.
+        # It can still be processed on purpose with "Process one stream".
+        db.update("vods", job["ref_id"], {"status": "ignored", "error": None, "updated_at": db.now()})
+    elif job["kind"] == "render_clip":
+        db.update("clips", job["ref_id"], {"render_state": "failed",
+                                           "render_error": "The render was cancelled. Save the clip again to render it."})
+    db.event(f"Cancelled: {job['label'] or job['kind']}.")
+    return Response(status_code=204)
+
+
 @app.post("/api/run-now")
 def run_all_now() -> dict:
     started = db.execute("UPDATE jobs SET force = 1, run_after = NULL WHERE status = 'queued' AND force = 0")

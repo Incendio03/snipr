@@ -116,6 +116,134 @@ def cmd_clip(args: argparse.Namespace) -> int:
     return 0
 
 
+def _streamer_or_defaults(streamer_id: int | None) -> dict:
+    from . import db
+
+    db.init()
+    if streamer_id is None:
+        return {"id": None, "name": "", "games": "", "clip_min_s": 20.0, "clip_max_s": 60.0}
+    streamer = db.get("streamers", streamer_id)
+    if streamer is None:
+        raise SystemExit(f"There is no streamer with id {streamer_id}.")
+    return streamer
+
+
+def cmd_nominate(args: argparse.Namespace) -> int:
+    """Write a stream's candidate moments, with their transcript, to a file for a person or an assistant to read.
+
+    This is the first half of picking clips by hand: Snipr finds where chat and
+    loudness spike and transcribes only those stretches. The reader chooses and
+    the picks come back in through ``import-picks``.
+    """
+    from . import pipeline, platforms, scoring, selection
+
+    settings = config.load_settings()
+    streamer = _streamer_or_defaults(args.streamer_id)
+    vod = platforms.vod_info(args.url)
+    games = scoring.parse_games(args.games if args.games is not None else streamer["games"])
+    ranges = scoring.game_ranges(games, vod.chapters, vod.title, vod.duration)
+    if ranges is None:
+        print(f"No part of this stream matches the game filter ({', '.join(games)}). Nothing to nominate.")
+        return 1
+    print(f"{vod.uploader}: {vod.title}  ({_clock(vod.duration)})")
+    signals = pipeline.analyze(vod, ranges, settings, _printer(), transcribe_speech=False)
+    sel = settings["selection"]
+    request = selection.SelectionRequest(
+        mode="highlights", instructions="", max_clips=args.count, clip_min_s=float(streamer["clip_min_s"]),
+        clip_max_s=float(streamer["clip_max_s"]), min_score=0.0, duration=vod.duration, span_start=0.0,
+        ranges=signals.ranges, transcript={"segments": []}, loudness=signals.loudness,
+        chat_rate=signals.chat_rate, nominations=args.count, window_s=sel["window_s"], step_s=sel["step_s"],
+        chat_weight=sel["chat_weight"], audio_weight=sel["audio_weight"])
+    nominated = selection.nominate_highlights(request)
+    if not nominated:
+        print("Nothing stood out in chat or loudness.")
+        return 1
+    analysis = pipeline.analyze(vod, ranges, settings, _printer(),
+                                speech_ranges=selection.speech_ranges(nominated, vod.duration))
+    from . import llm as llm_module
+
+    lines = [f"Stream: {vod.title}", f"Streamer: {vod.uploader}", f"Length: {_clock(vod.duration)}",
+             f"Clip length allowed: {streamer['clip_min_s']:.0f} to {streamer['clip_max_s']:.0f} seconds",
+             f"Chat replay: {'yes' if analysis.chat_rate is not None else 'no (loudness only)'}",
+             "", "Each candidate is a stretch where loudness or chat jumped. Lines start with the time in seconds.",
+             ""]
+    for index, win in enumerate(sorted(nominated, key=lambda w: w.raw, reverse=True), 1):
+        lo, hi = max(0.0, win.start - selection.SPEECH_BEFORE_S), win.end + selection.SPEECH_AFTER_S
+        lines += [f"=== Candidate {index} | flagged {win.start:.0f}-{win.end:.0f} s ({_clock(win.start)}) | "
+                  f"loudness spike {win.audio_z:.1f} | chat spike {win.chat_z:.1f}",
+                  llm_module.transcript_lines(analysis.transcript["segments"], lo, hi) or "(no speech here)", ""]
+    out = Path(args.out) if args.out else analysis.workdir / "nominations.txt"
+    out.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Wrote {len(nominated)} candidates to {out}")
+    return 0
+
+
+def cmd_import_picks(args: argparse.Namespace) -> int:
+    """Put hand-picked clips into the review queue and queue them for rendering.
+
+    The picks file is a JSON list. Each item needs ``start``, ``end`` and
+    ``score`` and may carry ``title``, ``reason``, ``flags``, ``headline``,
+    ``description``, ``hashtags`` and ``narration``.
+    """
+    from . import db, pipeline, platforms, scoring, transcribe, worker
+
+    settings = config.load_settings()
+    streamer = _streamer_or_defaults(args.streamer_id)
+    if streamer["id"] is None:
+        raise SystemExit("import-picks needs --streamer-id so the clips get that streamer's layout and limits.")
+    raw = json.loads(Path(args.picks).read_text(encoding="utf-8"))
+    platform, key = platforms.parse_vod_url(args.url)
+    vod = db.row("SELECT * FROM vods WHERE streamer_id = ? AND platform = ? AND vod_key = ?", (streamer["id"], platform, key))
+    info = platforms.vod_info(args.url)
+    folder = pipeline.vod_dir(info)
+    if not (folder / "transcript.json").exists():
+        raise SystemExit("This stream has not been analysed yet. Run 'snipr nominate' on it first.")
+    audio_files = sorted(p for p in folder.glob("audio.*") if not p.name.endswith(".part"))
+    fields = {"title": info.title, "duration": info.duration, "chapters": info.chapters, "status": "done",
+              "error": None, "span_start": 0.0, "ranges": [[0.0, info.duration]],
+              "audio_path": str(audio_files[0]) if audio_files else None, "updated_at": db.now()}
+    if vod is None:
+        vod_id = db.insert("vods", {"streamer_id": streamer["id"], "platform": platform, "vod_key": key,
+                                    "source_url": info.url, "created_at": db.now(), **fields})
+    else:
+        vod_id = vod["id"]
+        db.update("vods", vod_id, fields)
+
+    transcript = transcribe.load(folder / "transcript.json")
+    picks = scoring.validate_segments(raw, duration=info.duration, min_len=float(streamer["clip_min_s"]),
+                                      max_len=float(streamer["clip_max_s"]), min_score=0.0, limit=len(raw),
+                                      transcript_segments=transcript["segments"])
+    extras = {round(float(item["start"]), 1): item for item in raw
+              if isinstance(item, dict) and isinstance(item.get("start"), (int, float))}
+    existing = db.rows("SELECT start_s, end_s FROM clips WHERE vod_id = ? AND status != 'rejected'", (vod_id,))
+    credit = worker.credit_line(streamer) if settings["publishing"]["append_streamer_credit"] else ""
+    added = 0
+    for pick in sorted(picks, key=lambda p: p.start):
+        if any(pick.start < e["end_s"] and e["start_s"] < pick.end for e in existing):
+            print(f"  skipped {_clock(pick.start)}: overlaps a clip already in the queue")
+            continue
+        extra = extras.get(round(pick.start, 1), {})
+        tags = ["".join(ch for ch in str(t).lower() if ch.isalnum()) for t in extra.get("hashtags") or []]
+        clip_id = db.insert("clips", {
+            "vod_id": vod_id, "start_s": pick.start, "end_s": pick.end, "score": pick.score,
+            "reason": pick.reason, "flags": list(pick.flags), "layout": worker.streamer_layout(streamer),
+            "headline": " ".join(str(extra.get("headline") or "").split()), "title": pick.title or info.title,
+            "description": str(extra.get("description") or "").strip(), "credit": credit,
+            "hashtags": [t for t in tags if t][:5], "working_title": pick.title,
+            "narration": " ".join(str(extra.get("narration") or "").split()),
+            "status": "pending_review", "render_state": "rendering",
+            "destination_ids": [streamer["default_destination_id"]] if streamer["default_destination_id"] else [],
+            "created_at": db.now()})
+        worker.enqueue("render_clip", clip_id, f"Render: {pick.title or 'clip'}", force=True)
+        added += 1
+        print(f"  queued {_clock(pick.start)}-{_clock(pick.end)}  {pick.title}")
+    dropped = len(raw) - len(picks)
+    if dropped:
+        print(f"  {dropped} pick(s) were dropped: bad times, or outside the streamer's clip length limits")
+    print(f"Added {added} clip(s) to the review queue. They render as soon as Snipr is running.")
+    return 0
+
+
 def cmd_set_key(args: argparse.ArgumentParser) -> int:
     """Store the Anthropic API key in Windows Credential Manager."""
     import getpass
@@ -177,6 +305,20 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, help="port to listen on (default 8765)")
     serve.add_argument("--open", action="store_true", help="open the page in the browser")
     serve.set_defaults(func=cmd_serve)
+
+    nominate = sub.add_parser("nominate", help="write a stream's candidate moments and their transcript to a file")
+    nominate.add_argument("url", help="link to a Twitch VOD or a YouTube stream replay")
+    nominate.add_argument("--streamer-id", type=int, help="use this streamer's games and clip length limits")
+    nominate.add_argument("--games", help="game filter, comma separated (default: the streamer's)")
+    nominate.add_argument("--count", type=int, default=40, help="how many candidates to write (default 40)")
+    nominate.add_argument("--out", help="file to write (default: nominations.txt in the stream's working folder)")
+    nominate.set_defaults(func=cmd_nominate)
+
+    picks = sub.add_parser("import-picks", help="put hand-picked clips into the review queue")
+    picks.add_argument("url", help="link to the stream the picks are from")
+    picks.add_argument("picks", help="JSON file with the picks")
+    picks.add_argument("--streamer-id", type=int, required=True, help="the streamer the clips belong to")
+    picks.set_defaults(func=cmd_import_picks)
 
     key = sub.add_parser("set-key", help="store the Anthropic API key in Windows Credential Manager")
     key.add_argument("--clear", action="store_true", help="remove the stored key")

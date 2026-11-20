@@ -7,8 +7,9 @@ def data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("SNIPR_DATA", str(tmp_path))
     monkeypatch.setenv("SNIPR_NO_BACKGROUND", "1")
     monkeypatch.setenv("SNIPR_NO_NOTIFY", "1")
-    from snipr import db, llm
+    from snipr import db, llm, worker
 
+    monkeypatch.setattr(worker, "is_online", lambda: True)        # tests never depend on the real connection
     monkeypatch.setattr(llm.secrets, "get", lambda name: None)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)

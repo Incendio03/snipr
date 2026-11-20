@@ -43,13 +43,38 @@ def vod_dir(vod: VodInfo) -> Path:
     return config.subdir("vods") / f"{vod.platform}-{vod.vod_id}"
 
 
+def merge_ranges(ranges: list[tuple[float, float]], gap: float = 0.0) -> list[tuple[float, float]]:
+    """Sort ranges and join the ones that overlap or sit within ``gap`` seconds of each other."""
+    merged: list[tuple[float, float]] = []
+    for lo, hi in sorted(ranges):
+        if merged and lo <= merged[-1][1] + gap:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], hi))
+        else:
+            merged.append((lo, hi))
+    return merged
+
+
+def _covers(have: list | None, want: list[tuple[float, float]]) -> bool:
+    """Do the transcribed ranges ``have`` include every range in ``want``?"""
+    if not have:
+        return False
+    return all(any(a - 1 <= lo and hi <= b + 1 for a, b in have) for lo, hi in want)
+
+
 def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
-            settings: dict | None = None, progress: Progress = _noop) -> Analysis:
+            settings: dict | None = None, progress: Progress = _noop,
+            speech_ranges: list[tuple[float, float]] | None = None, transcribe_speech: bool = True) -> Analysis:
     """Download the audio of a VOD and derive everything selection needs.
 
     ``ranges`` limits the work to parts of the VOD (the game filter). Each step
     saves its result in the VOD's working folder and is skipped on a rerun, so
     a failure late in the stage does not repeat the download or transcription.
+
+    Transcription is the slow step, so it can be narrowed further:
+    ``transcribe_speech=False`` skips it (chat and loudness only), and
+    ``speech_ranges`` transcribes just those stretches. Highlights uses both:
+    it finds the spikes first, then transcribes only around them, which turns
+    forty minutes of work on a 24 hour stream into a few.
     """
     settings = settings or config.load_settings()
     work = vod_dir(vod)
@@ -62,7 +87,6 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     # transcription, are limited to the wanted ranges.
     span = (0.0, vod.duration)
     busy = (int(min(lo for lo, _ in ranges)), int(max(hi for _, hi in ranges)))
-    range_key = [[round(a), round(b)] for a, b in ranges]
     state_path = work / "analysis.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
     if state.get("v") != 4:            # bump when the format of a saved step changes
@@ -118,21 +142,25 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
 
     # 4. transcript
     transcript_path = work / "transcript.json"
-    if state.get("transcript_ranges") == range_key and transcript_path.exists():
+    wanted = merge_ranges([(max(0.0, lo), min(vod.duration, hi)) for lo, hi in speech_ranges]) \
+        if speech_ranges is not None else ranges
+    if not transcribe_speech:
+        return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, {"segments": []}, {})
+    if _covers(state.get("transcript_ranges"), wanted) and transcript_path.exists():
         transcript = transcribe.load(transcript_path)
         stats = state.get("stats", {})
     else:
         progress("transcribe", 0.0)
         cfg = settings["transcription"]
-        whole = len(ranges) == 1 and ranges[0][0] <= 1.0 and ranges[0][1] >= vod.duration - 1.0
+        whole = len(wanted) == 1 and wanted[0][0] <= 1.0 and wanted[0][1] >= vod.duration - 1.0
         transcript, tstats = transcribe.transcribe(
             audio_path, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)),
-            ranges=None if whole else ranges, progress=lambda f: progress("transcribe", f))
+            ranges=None if whole else wanted, progress=lambda f: progress("transcribe", f))
         transcribe.save(transcript, transcript_path)
         stats = {"audio_seconds": round(tstats.audio_seconds, 1), "wall_seconds": round(tstats.wall_seconds, 1),
                  "speed": round(tstats.speed, 2), "device": tstats.device, "model": tstats.model,
                  "compute_type": tstats.compute_type}
-        remember(transcript_ranges=range_key, stats=stats)
+        remember(transcript_ranges=[[round(a), round(b)] for a, b in wanted], stats=stats)
     progress("transcribe", 1.0)
 
     return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, transcript, stats)
