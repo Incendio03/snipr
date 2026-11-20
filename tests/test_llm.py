@@ -231,6 +231,7 @@ def _gemini(monkeypatch, response):
     """A Gemini provider whose HTTP call is replaced; returns the provider and the captured request."""
     provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
     provider.rate_limit_waits_s = (0, 0)             # tests never wait out a real minute
+    provider.unavailable_waits_s = (0, 0)
     sent = {}
 
     def fake_post(body):
@@ -278,7 +279,12 @@ def test_gemini_errors_are_explained(monkeypatch):
         (FakeResponse(404, {"error": {"message": "model not found"}}), "was not found"),
         (FakeResponse(429, {"error": {"message": "quota"}}), "rate limit"),
         (FakeResponse(400, {"error": {"message": "Unknown name foo"}}), "rejected the request: Unknown name foo"),
-        (FakeResponse(503, {}), "returned an error (503)"),
+        (FakeResponse(503, {}), "temporarily unavailable (503). This is on Google's side, not your key"),
+        (FakeResponse(503, {"error": {"message": "The model is overloaded. Please try again later."}}),
+         "Google says: The model is overloaded. Please try again later."),
+        (FakeResponse(429, {"error": {"message": "Quota exceeded for input tokens per minute, limit 250000"}}),
+         "Google says: Quota exceeded for input tokens per minute, limit 250000"),
+        (FakeResponse(418, {"error": {"message": "teapot"}}), "returned an error (418). Google says: teapot"),
         (FakeResponse(200, {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}), "declined this request"),
         (FakeResponse(200, {"candidates": []}), "no answer"),
         (_gemini_answer({"segments": []}, finish="MAX_TOKENS"), "cut off"),
@@ -309,6 +315,33 @@ def test_gemini_waits_out_a_rate_limit_and_sends_long_transcripts_in_parts(monke
 
     assert llm.GeminiProvider.max_transcript_tokens < llm.MAX_TRANSCRIPT_TOKENS
     assert llm.AnthropicProvider(model="m", client=object())._transcript_limit() == llm.MAX_TRANSCRIPT_TOKENS
+
+
+def test_gemini_retries_when_google_is_briefly_unavailable(monkeypatch):
+    provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    provider.rate_limit_waits_s = provider.unavailable_waits_s = (0, 0)
+    answers = [FakeResponse(503, {}), FakeResponse(500, {}), _gemini_answer({"segments": []})]
+    calls = []
+    monkeypatch.setattr(provider, "_post", lambda body: (calls.append(1), answers.pop(0))[1])
+    assert provider.select_segments(_request(), None) == []
+    assert len(calls) == 3                                      # two "unavailable" answers were waited out
+
+    down = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    down.rate_limit_waits_s = down.unavailable_waits_s = (0, 0)
+    tries = []
+    monkeypatch.setattr(down, "_post", lambda body: (tries.append(1), FakeResponse(503, {}))[1])
+    with pytest.raises(llm.LLMError, match="temporarily unavailable"):
+        down.select_segments(_request(), None)
+    assert len(tries) == 3                                      # gives up after the two waits
+
+
+def test_gemini_reads_how_long_google_asks_it_to_wait():
+    asked = FakeResponse(429, {"error": {"message": "quota", "details": [
+        {"@type": "type.googleapis.com/google.rpc.Help"},
+        {"@type": "type.googleapis.com/google.rpc.RetryInfo", "retryDelay": "34s"}]}})
+    assert llm.GeminiProvider._retry_delay(asked) == 34.0
+    assert llm.GeminiProvider._retry_delay(FakeResponse(429, {"error": {"message": "quota"}})) is None
+    assert llm.GeminiProvider._retry_delay(FakeResponse(429, {"error": {"details": [{"retryDelay": "soon"}]}})) is None
 
 
 def test_provider_follows_the_setting_and_its_own_key(monkeypatch):

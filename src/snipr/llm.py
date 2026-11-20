@@ -426,6 +426,7 @@ class GeminiProvider(Provider):
 
     max_transcript_tokens = 150_000
     rate_limit_waits_s = (65, 65)            # pauses after a 429 before the request counts as failed
+    unavailable_waits_s = (8, 25)            # pauses after a 500 or 503
 
     def _parts(self, prompt: str | list) -> list[dict]:
         if isinstance(prompt, str):
@@ -457,14 +458,24 @@ class GeminiProvider(Provider):
         }
         import time
 
-        for wait in (*self.rate_limit_waits_s, None):
+        # Two kinds of answer are worth waiting out: "slow down" (429), where the
+        # per-minute allowance refills, and "unavailable" (500, 503), where Google's
+        # side is briefly overloaded. Anything else fails straight away.
+        slow_waits = list(self.rate_limit_waits_s)
+        busy_waits = list(self.unavailable_waits_s)
+        while True:
             try:
                 response = self._post(body)
             except httpx.HTTPError as exc:
                 raise LLMError("Could not reach the Gemini API. Check the internet connection.") from exc
-            if response.status_code != 429 or wait is None:
+            if response.status_code == 429 and slow_waits:
+                asked = self._retry_delay(response)
+                default = slow_waits.pop(0)
+                time.sleep(min(90.0, asked + 2.0) if asked is not None and default else default)
+            elif response.status_code in (500, 503) and busy_waits:
+                time.sleep(busy_waits.pop(0))
+            else:
                 break
-            time.sleep(wait)                 # the per-minute allowance refills; try again
         if response.status_code != 200:
             raise LLMError(self._error_text(response))
         data = response.json()
@@ -493,11 +504,28 @@ class GeminiProvider(Provider):
         except json.JSONDecodeError as exc:
             raise LLMError("The model's answer was not valid JSON.") from exc
 
+    @staticmethod
+    def _retry_delay(response) -> float | None:
+        """How long Google asks us to wait before retrying, when it says so."""
+        try:
+            details = (response.json().get("error") or {}).get("details") or []
+        except ValueError:
+            return None
+        for item in details:
+            delay = str((item or {}).get("retryDelay") or "")
+            if delay.endswith("s"):
+                try:
+                    return float(delay[:-1])
+                except ValueError:
+                    return None
+        return None
+
     def _error_text(self, response) -> str:
         try:
             detail = (response.json().get("error") or {}).get("message", "")
         except ValueError:
             detail = ""
+        said = " ".join(str(detail).split())[:300]          # Google's own explanation, kept short
         status = response.status_code
         if status in (401, 403) or "API key not valid" in detail or "API_KEY_INVALID" in detail:
             return "The Gemini API key was rejected. Check it in settings."
@@ -505,10 +533,15 @@ class GeminiProvider(Provider):
             return f"The model '{self.model}' was not found. Check the Gemini model name in settings."
         if status == 429:
             return ("The Gemini rate limit was reached. On the free tier that usually means today's or this "
-                    "minute's allowance is used up. The job will be retried.")
+                    "minute's allowance is used up. The job will be retried."
+                    + (f" Google says: {said}" if said else ""))
         if status == 400:
-            return f"The Gemini API rejected the request: {detail[:300] or 'no reason given'}"
-        return f"The Gemini API returned an error ({status})."
+            return f"The Gemini API rejected the request: {said or 'no reason given'}"
+        if status in (500, 503):
+            return (f"Gemini is temporarily unavailable ({status}). This is on Google's side, not your key. "
+                    "Try again in a few minutes, or switch to another Gemini model in Settings."
+                    + (f" Google says: {said}" if said else ""))
+        return f"The Gemini API returned an error ({status})." + (f" Google says: {said}" if said else "")
 
 
 PROVIDERS = {
