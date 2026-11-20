@@ -62,7 +62,14 @@ def enqueue(kind: str, ref_id: int, label: str, force: bool = False) -> int:
 
 
 def window_is_open(settings: dict | None = None, now: datetime | None = None) -> bool:
+    """May heavy jobs start by themselves right now?
+
+    Never in manual mode, where a stream waits for Run now. In window mode,
+    only inside the processing window.
+    """
     processing = (settings or config.load_settings())["processing"]
+    if processing.get("mode", "manual") != "window":
+        return False
     return publish.window_open((now or datetime.now()).time(), processing["window_start"], processing["window_end"])
 
 
@@ -450,7 +457,8 @@ class Worker(threading.Thread):
 
     def run(self) -> None:
         # A job left "running" belongs to a previous process that was closed mid-job.
-        db.execute("UPDATE jobs SET status = 'queued', stage = '', progress = NULL WHERE status = 'running'")
+        # It had already been started, so it carries on without waiting for Run now or the window.
+        db.execute("UPDATE jobs SET status = 'queued', stage = '', progress = NULL, force = 1 WHERE status = 'running'")
         while not self._stop_event.is_set():
             try:
                 settings = config.load_settings()

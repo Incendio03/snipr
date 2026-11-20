@@ -150,6 +150,13 @@ export function mount(root, ctx) {
     const windowStart = text(saved.processing && saved.processing.window_start, 'input--mono input--w120');
     const windowEnd = text(saved.processing && saved.processing.window_end, 'input--mono input--w120');
     for (const el of [windowStart, windowEnd]) { el.placeholder = 'HH:MM'; el.maxLength = 5; }
+    const procMode = h('select', { class: 'input', id: 'set-proc-mode' },
+      h('option', { value: 'manual' }, 'Manually, when I press Run now'),
+      h('option', { value: 'window' }, 'By itself, inside a time window'));
+    procMode.value = (saved.processing && saved.processing.mode) || 'manual';
+    const windowBlock = h('div', { class: 'block' });
+    function paintProcMode() { windowBlock.hidden = procMode.value !== 'window'; }
+    procMode.addEventListener('change', paintProcMode);
     const pollMinutes = number(saved.processing && saved.processing.poll_minutes, { min: '1', step: '1' });
     const maxRetries = number(saved.processing && saved.processing.max_retries, { min: '0', step: '1' });
     const minScore = number(saved.selection && saved.selection.min_score, { min: '0', max: '1', step: '0.05' });
@@ -203,6 +210,7 @@ export function mount(root, ctx) {
       if (!geminiName) fail(errors.model, 'Write the Gemini model name, for example gemini-3.5-flash-lite.', geminiModel);
       else put('llm', 'gemini_model', geminiName, s.llm && s.llm.gemini_model);
 
+      put('processing', 'mode', procMode.value, (s.processing && s.processing.mode) || 'manual');
       const start = fmt.normaliseHHMM(windowStart.value);
       const end = fmt.normaliseHHMM(windowEnd.value);
       if (!start || !end) fail(errors.window, 'Write both times as 24 hour HH:MM, for example 01:00.', start ? windowEnd : windowStart);
@@ -259,13 +267,9 @@ export function mount(root, ctx) {
         geminiPane,
         errors.model,
         h('div', { class: 'block', style: { gap: '10px' } }, h('div', null, testBtn), testResult)),
-      section('Processing', 'Downloading, transcription and encoding only run inside this window, unless you press Run now in Activity.',
-        h('div', { class: 'block' },
-          h('div', { class: 'row' },
-            field({ label: 'Window opens', control: windowStart }),
-            field({ label: 'Window closes', control: windowEnd })),
-          h('span', { class: 'help' }, '24 hour local time. A window that closes earlier than it opens runs past midnight.'),
-          errors.window),
+      section('Processing', 'When the heavy work on a stream starts: downloading, transcription and encoding. Finding new streams always happens by itself.',
+        field({ label: 'Start processing', control: procMode, help: 'Manual is the default. With a time window, waiting streams also start by themselves inside those hours; Run now still works any time.' }),
+        windowBlock,
         h('div', { class: 'block' },
           h('div', { class: 'row' },
             field({ label: 'Check for new streams every (minutes)', control: pollMinutes }),
@@ -319,6 +323,14 @@ export function mount(root, ctx) {
       geminiKey.el,
       field({ label: 'Gemini model', control: geminiModel, help: 'gemini-3.5-flash-lite is the default because it reliably answers on the free tier. gemini-3.8-flash and gemini-3.6-flash are stronger but are often overloaded there; if the chosen model is too busy, Snipr falls back to a Flash-Lite model by itself. Get a key in Google AI Studio (aistudio.google.com), under "Get API key".' }),
       notice('warn', (saved.llm && saved.llm.gemini_note) || 'On the free tier, Google uses what is sent to improve its products.'));
+
+    windowBlock.append(
+      h('div', { class: 'row' },
+        field({ label: 'Window opens', control: windowStart }),
+        field({ label: 'Window closes', control: windowEnd })),
+      h('span', { class: 'help' }, '24 hour local time. A window that closes earlier than it opens runs past midnight.'),
+      errors.window);
+    paintProcMode();
 
     replace(body, form);
     claudeKey.paint(false);

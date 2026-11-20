@@ -4,6 +4,7 @@ Each milestone in `docs/design.md` gets a version bump and a git tag: milestone 
 
 ## Unreleased
 
+- **Processing is manual by default.** New streams are still found by themselves and listed on Activity, but nothing heavy starts until Run now is pressed. A time window is an option in Settings for processing unattended. A job interrupted by a restart carries on by itself.
 - **Gemini as a second AI provider.** Settings has a provider choice (Claude or Gemini), a key for each, a model name for each, and a "Test connection" button. Gemini has a free tier; on it Google uses what is sent to improve its products.
 - Gemini checked against the live API on 2026-11-21: `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` answer in under two seconds; `gemini-3.8-flash` and `gemini-3.6-flash` were overloaded. The default is now `gemini-3.5-flash-lite`, an overloaded model falls back to a Flash-Lite one, brief outages and rate limits are waited out, and errors carry Google's own explanation.
 - **Picking clips by hand.** `snipr nominate` writes a stream's candidate moments with their transcript; `snipr import-picks` puts chosen clips in the review queue. Used for the first set of clips from a 24 hour stream.

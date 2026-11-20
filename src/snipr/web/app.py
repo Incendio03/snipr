@@ -95,8 +95,8 @@ async def guard(request: Request, call_next):
 
 def _window(settings: dict) -> dict:
     processing = settings["processing"]
-    return {"start": processing["window_start"], "end": processing["window_end"],
-            "open_now": worker.window_is_open(settings)}
+    return {"mode": processing.get("mode", "manual"), "start": processing["window_start"],
+            "end": processing["window_end"], "open_now": worker.window_is_open(settings)}
 
 
 def _worker_state() -> dict:
@@ -839,7 +839,8 @@ def settings_out() -> dict:
                     "gemini_note": "On Gemini's free tier, Google uses what Snipr sends (stream transcripts and, "
                                    "for voiceover, still frames) to improve its products. On the paid tier it "
                                    "does not."},
-            "processing": {k: s["processing"][k] for k in ("window_start", "window_end", "poll_minutes", "max_retries")},
+            "processing": {"mode": s["processing"].get("mode", "manual"),
+                           **{k: s["processing"][k] for k in ("window_start", "window_end", "poll_minutes", "max_retries")}},
             "selection": {"min_score": s["selection"]["min_score"]},
             "publishing": {"default_post_slots": s["publishing"]["default_post_slots"],
                            "append_streamer_credit": bool(s["publishing"]["append_streamer_credit"])},
@@ -876,6 +877,10 @@ def put_settings(body: dict = Body(...)) -> dict:
                     raise bad("That does not look like a model name.")
                 changes.setdefault("llm", {})[key] = str(model)
         processing = body.get("processing") or {}
+        if "mode" in processing:
+            if processing["mode"] not in ("manual", "window"):
+                raise bad("Processing must be Manual or Time window.")
+            changes.setdefault("processing", {})["mode"] = processing["mode"]
         for key in ("window_start", "window_end"):
             if key in processing:
                 changes.setdefault("processing", {})[key] = publish.parse_time(processing[key]).strftime("%H:%M")

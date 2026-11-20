@@ -27,7 +27,7 @@ export function mount(root, ctx) {
   root.classList.add('main--wide-gap');
   const head = pageHead({
     title: 'Activity',
-    sub: 'New VODs are picked up all day. Downloading, transcription and encoding wait for the processing window, so they stay out of your way.',
+    sub: 'New streams are found all day and listed here. The heavy work (downloading, transcription, encoding) starts when you press Run now, or by itself if you set a time window.',
   });
   const stale = h('div', { hidden: true, role: 'status' });
   const windowCard = h('section', { class: 'window-card', 'aria-label': 'Processing window' });
@@ -106,9 +106,10 @@ export function mount(root, ctx) {
       }
       const nowMin = now.getHours() * 60 + now.getMinutes();
 
+      const manual = win.mode !== 'window';
       const runAll = h('button', {
         type: 'button', class: `btn btn--ground${waiting ? ' btn--accent' : ''}`, 'data-key': 'run-all',
-        disabled: runAllBusy || !waiting, title: waiting ? '' : 'No jobs are waiting for the window',
+        disabled: runAllBusy || !waiting, title: waiting ? '' : 'No streams are waiting',
       }, waiting ? `Run now (${waiting})` : 'Run now');
       runAll.addEventListener('click', async () => {
         runAllBusy = true;
@@ -117,7 +118,7 @@ export function mount(root, ctx) {
           const result = await api.activity.runNow();
           if (!alive) return;
           const n = result && typeof result.started === 'number' ? result.started : null;
-          toast(n == null ? 'Started.' : n ? `Started ${fmt.plural(n, 'job')} without waiting for the window.` : 'Nothing was waiting.', { kind: 'ok' });
+          toast(n == null ? 'Started.' : n ? `Started ${fmt.plural(n, 'job')}.` : 'Nothing was waiting.', { kind: 'ok' });
         } catch (err) {
           if (alive) toastError(err);
         } finally {
@@ -126,14 +127,32 @@ export function mount(root, ctx) {
         }
       });
 
+      const workerLine = h('span', { class: 'worker' },
+        h('span', { class: `dot${worker.busy ? ' dot--busy' : ''}`, 'aria-hidden': 'true' }),
+        worker.busy ? `Worker: ${worker.current || 'busy'}` : 'Worker: idle');
+      if (manual) {
+        // Manual is the default: nothing heavy starts until Run now is pressed.
+        replace(windowCard,
+          h('div', { class: 'window-card__now' },
+            h('h2', { class: 'micro' }, 'Processing'),
+            h('span', { class: 'window-card__time' }, 'Manual'),
+            h('span', { class: 'muted' }, waiting
+              ? `${fmt.plural(waiting, 'stream')} waiting. Nothing starts until you press Run now.`
+              : 'Nothing starts by itself. New streams wait here until you press Run now.'),
+            workerLine),
+          h('div', { class: 'window-card__bar' },
+            h('span', { class: 'help' }, 'Want streams processed while you sleep? Set a time window in Settings and they will start by themselves inside it.')),
+          h('div', { class: 'window-card__actions' },
+            runAll,
+            h('a', { class: 'btn btn--ground', href: '#/settings' }, 'Set a window')));
+        return;
+      }
       replace(windowCard,
         h('div', { class: 'window-card__now' },
           h('h2', { class: 'micro' }, 'Processing window'),
           h('span', { class: 'window-card__time' }, win.start && win.end ? `${win.start} to ${win.end}` : 'Not set'),
           h('span', { class: 'muted' }, win.open_now ? `Open now. Closes at ${win.end}.` : `Closed now. Opens at ${win.start}.`),
-          h('span', { class: 'worker' },
-            h('span', { class: `dot${worker.busy ? ' dot--busy' : ''}`, 'aria-hidden': 'true' }),
-            worker.busy ? `Worker: ${worker.current || 'busy'}` : 'Worker: idle')),
+          workerLine),
         h('div', { class: 'window-card__bar' },
           h('div', { class: 'daybar', 'aria-hidden': 'true' },
             segments.map(([a, b]) => h('div', { class: 'daybar__open', style: { left: `${(a / 1440) * 100}%`, width: `${((b - a) / 1440) * 100}%` } })),
@@ -150,7 +169,10 @@ export function mount(root, ctx) {
     const attempt = job.max_attempts ? `Attempt ${job.attempts ?? 1} of ${job.max_attempts}.` : '';
     if (job.status === 'failed') return { cls: 'job__note--danger', text: `${attempt} ${job.error || 'No reason was given.'}`.trim() };
     if (job.status === 'running' && (job.attempts ?? 1) > 1) return { cls: 'job__note--warn', text: `${attempt}${job.error ? ` Last try: ${job.error}` : ''}` };
-    if (job.status === 'waiting') return { cls: '', text: win && win.start ? `Waiting for the window at ${win.start}.` : 'Waiting for the processing window.' };
+    if (job.status === 'waiting') {
+      if (!win || win.mode !== 'window') return { cls: '', text: 'Waiting for you to press Run now.' };
+      return { cls: '', text: win.start ? `Waiting for the window at ${win.start}.` : 'Waiting for the processing window.' };
+    }
     if (job.status === 'queued') return { cls: '', text: 'In line behind the current job.' };
     if (job.status === 'done') return { cls: '', text: job.updated_at ? `Finished ${fmt.when(job.updated_at)}.` : 'Finished.' };
     return { cls: '', text: job.updated_at ? `Updated ${fmt.when(job.updated_at)}.` : '' };

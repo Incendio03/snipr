@@ -43,7 +43,7 @@ Ingest --> Analyze --> Select --> Produce --> Review --> Publish
 
 Everything runs locally except the LLM calls and the uploads. Each stage reads and writes job state in the database, so a failed stage can be retried without redoing the earlier ones.
 
-**Processing window.** Detecting new VODs runs all day. The heavy stages (download, transcription, encoding) run only inside a time window you set, 01:00 to 08:00 by default, so they do not compete with you for the PC. A "run now" button starts a job outside the window.
+**When processing starts.** Detecting new VODs runs all day and lists them on the Activity page. The heavy stages (download, transcription, encoding) are **manual by default**: a stream waits until you press "Run now". As an option in Settings you can set a time window (for example 01:00 to 08:00); waiting streams then also start by themselves inside it, so they do not compete with you for the PC. "Run now" works in either mode.
 
 **Failures.** A failed stage retries automatically up to 3 times with a delay. After that it stops, shows the error on the web page, and waits for a manual retry.
 

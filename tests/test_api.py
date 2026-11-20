@@ -22,7 +22,7 @@ def test_requests_from_other_sites_and_hosts_are_refused(client):
 def test_state_reports_counts_and_missing_key(client, seeded):
     state = client.get("/api/state").json()
     assert state["review_count"] == 2 and state["due_posts"] == 0 and state["llm_ready"] is False
-    assert set(state["window"]) == {"start", "end", "open_now"}
+    assert set(state["window"]) == {"mode", "start", "end", "open_now"} and state["window"]["mode"] == "manual"
 
 
 # ---- streamers --------------------------------------------------------------
@@ -312,6 +312,31 @@ def test_activity_shows_jobs_held_for_the_window_and_run_now_releases_them(clien
 
     assert client.post(f"/api/jobs/{job_id}/run-now").json()["status"] == "queued"
     assert worker.next_job(settings, midday)["id"] == job_id
+
+
+def test_manual_is_the_default_and_a_window_is_opt_in(client, seeded):
+    from datetime import datetime
+
+    from snipr import config
+
+    inside = datetime(2026, 11, 21, 3, 0)                              # 03:00, inside the default 01:00 to 08:00
+    job_id = worker.enqueue("process_vod", seeded["vod"], "pixelmoth: GTA 6 day 2")
+
+    settings = config.load_settings()
+    assert settings["processing"]["mode"] == "manual"
+    assert worker.next_job(settings, inside) is None                   # manual: nothing starts by itself, even at 03:00
+    assert worker.job_view(db.get("jobs", job_id), settings, inside)["status"] == "waiting"
+
+    saved = client.put("/api/settings", json={"processing": {"mode": "window"}}).json()
+    assert saved["processing"]["mode"] == "window"
+    settings = config.load_settings()
+    assert worker.next_job(settings, inside)["id"] == job_id           # window mode: starts inside the hours
+    assert worker.next_job(settings, datetime(2026, 11, 21, 12, 0)) is None   # and waits outside them
+
+    client.put("/api/settings", json={"processing": {"mode": "manual"}})
+    assert client.post(f"/api/jobs/{job_id}/run-now").json()["status"] == "queued"
+    assert worker.next_job(config.load_settings(), inside)["id"] == job_id    # Run now works in manual mode
+    assert client.put("/api/settings", json={"processing": {"mode": "always"}}).status_code == 422
 
 
 def test_failed_jobs_retry_then_stop_and_can_be_retried_by_hand(client, seeded, monkeypatch):

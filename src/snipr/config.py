@@ -33,6 +33,9 @@ DEFAULTS: dict[str, Any] = {
         "audio_weight": 0.4,
     },
     "processing": {
+        # "manual": streams wait until Run now is pressed. "window": they also start
+        # by themselves inside the hours below.
+        "mode": "manual",
         "window_start": "01:00",
         "window_end": "08:00",
         "max_retries": 3,
