@@ -1,0 +1,36 @@
+[project]
+name = "snipr"
+version = "0.0.0"
+description = "Personal tool that turns streamer VODs into short vertical clips with a review queue."
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "anthropic>=0.40",
+    "apscheduler>=3.10,<4",
+    "fastapi>=0.115",
+    "faster-whisper>=1.1",
+    "httpx>=0.27",
+    "keyring>=25",
+    "numpy>=1.26",
+    # Pinned to releases that ship Windows wheels (newer ones are Linux-only).
+    "nvidia-cublas-cu12==12.9.2.10; sys_platform == 'win32'",
+    "nvidia-cudnn-cu12==9.9.0.52; sys_platform == 'win32'",
+    "pyyaml>=6",
+    "uvicorn>=0.30",
+    "yt-dlp>=2025.1.1",
+]
+
+[project.scripts]
+snipr = "snipr.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/snipr"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
