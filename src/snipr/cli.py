@@ -135,6 +135,22 @@ def cmd_set_key(args: argparse.ArgumentParser) -> int:
     return 0
 
 
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Run the web page, the worker and the scheduler."""
+    import uvicorn
+
+    server = config.load_settings()["server"]
+    host, port = server["host"], int(args.port or server["port"])
+    url = f"http://{host}:{port}/"
+    print(f"Snipr {__version__} is running at {url}  (Ctrl+C to stop)")
+    if args.open:
+        import threading
+        import webbrowser
+        threading.Timer(1.5, webbrowser.open, args=(url,)).start()
+    uvicorn.run("snipr.web.app:app", host=host, port=port, log_level="warning")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="snipr", description="Streamer VODs in, short clips out.")
     parser.add_argument("--version", action="version", version=f"snipr {__version__}")
@@ -156,6 +172,11 @@ def build_parser() -> argparse.ArgumentParser:
                       help="fill: 9:16 centre crop with headline and captions; source: original framing")
     clip.add_argument("--out", help="folder for the clips (default: the VOD's working folder)")
     clip.set_defaults(func=cmd_clip)
+
+    serve = sub.add_parser("serve", help="run the web page, the worker and the scheduler")
+    serve.add_argument("--port", type=int, help="port to listen on (default 8765)")
+    serve.add_argument("--open", action="store_true", help="open the page in the browser")
+    serve.set_defaults(func=cmd_serve)
 
     key = sub.add_parser("set-key", help="store the Anthropic API key in Windows Credential Manager")
     key.add_argument("--clear", action="store_true", help="remove the stored key")

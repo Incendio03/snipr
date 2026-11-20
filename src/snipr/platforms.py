@@ -234,6 +234,30 @@ def download_video(url: str, out_path: Path, start: float, end: float, height: i
     return _download(url, out_path, fmt, (max(0.0, start), end), progress, "mp4")
 
 
+def sample_frame(channel: Channel, out_path: Path) -> dict:
+    """Save one frame from the channel's latest finished stream, for marking crops.
+
+    Only a two second section is downloaded. Returns the frame's size and the
+    stream's title. Raises ``PlatformError`` when the channel has no finished stream.
+    """
+    vods = [v for v in list_vods(channel, limit=4) if v.duration == 0 or v.duration > 120]
+    if not vods:
+        raise PlatformError("This channel has no finished stream to take a frame from yet. "
+                            "You can still add the streamer; clips will use a centre crop.")
+    vod = vods[0]
+    info = vod_info(vod.url)
+    # A third of the way in, capped at 20 minutes: past the "starting soon" screen.
+    at = min(max(60.0, info.duration / 3), 1200.0) if info.duration else 300.0
+    section = download_video(vod.url, out_path.with_name(out_path.stem + "_section"), at, at + 2.0)
+    try:
+        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(section), "-frames:v", "1",
+                        "-q:v", "3", "-update", "1", str(out_path)], check=True, capture_output=True)
+        size = probe_video(section)
+    finally:
+        section.unlink(missing_ok=True)
+    return {"width": size["width"], "height": size["height"], "vod_title": info.title}
+
+
 def probe_duration(path: Path) -> float:
     out = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
