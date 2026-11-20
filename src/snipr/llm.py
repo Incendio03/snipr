@@ -131,7 +131,7 @@ What to say:
 - Be specific. Name what is on screen and what the streamer says. If the transcript says tiger, say tiger, not "a wild animal". Vague lines that could describe any clip are a failure.
 - Only say what the frames and the transcript support. Do not invent facts about the game, such as features, numbers or release details, and do not claim to know what the streamer is thinking.
 - Refer to the streamer by name where it reads naturally.
-- Use the word budget: aim for 70 to 100 percent of it across all lines. It is a hard upper limit, because a script over budget gets cut off.
+- The word budget is what fits if the narrator talked for the whole clip. It is a hard upper limit, because a script over budget gets cut off. Aim for a third to a half of it: enough lines to carry the clip (usually four to seven), with the streamer heard in between. A script of only a few short lines is too thin.
 
 Write plain sentences only: no stage directions, no bracketed notes, no speaker labels, no emoji, no hashtags, no quotation marks. Write numbers the way they should be spoken."""
 

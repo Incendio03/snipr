@@ -3,6 +3,8 @@
 Each milestone in `docs/design.md` gets a version bump and a git tag: milestone N is `v0.N.0`.
 
 ## Unreleased
+- Timed narration: each line can start with a time like `[12.5]`, `[pause]` leaves a gap, the streamer is heard between lines, and the AI reads the clip's transcript with timestamps.
+- Default narration style per streamer.
 
 - **Processing is manual by default.** New streams are still found by themselves and listed on Activity, but nothing heavy starts until Run now is pressed. A time window is an option in Settings for processing unattended. A job interrupted by a restart carries on by itself.
 - **Gemini as a second AI provider.** Settings has a provider choice (Claude or Gemini), a key for each, a model name for each, and a "Test connection" button. Gemini has a free tier; on it Google uses what is sent to improve its products.
