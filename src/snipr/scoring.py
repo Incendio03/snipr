@@ -93,8 +93,10 @@ def nominate(windows: list[Window], count: int, merge_gap_s: float = 10.0,
     """Pick the ``count`` best non-overlapping moments.
 
     Windows are taken best first. One that overlaps or sits within
-    ``merge_gap_s`` of an already chosen moment is merged into it (up to
-    ``max_len_s``) instead of becoming a second nomination of the same moment.
+    ``merge_gap_s`` of an already chosen moment never becomes a second
+    nomination of it. It widens the chosen moment (up to ``max_len_s``) only
+    when it is nearly as strong, which means the moment really lasts that
+    long; the weaker shoulders of a short spike are simply dropped.
     """
     chosen: list[Window] = []
     for win in sorted(windows, key=lambda w: (w.raw, w.score), reverse=True):
@@ -104,7 +106,7 @@ def nominate(windows: list[Window], count: int, merge_gap_s: float = 10.0,
         for i, kept in enumerate(chosen):
             if win.start <= kept.end + merge_gap_s and win.end >= kept.start - merge_gap_s:
                 start, end = min(kept.start, win.start), max(kept.end, win.end)
-                if end - start <= max_len_s:
+                if win.raw >= 0.75 * kept.raw and end - start <= max_len_s:
                     chosen[i] = Window(start, end, kept.score, max(kept.chat_z, win.chat_z),
                                        max(kept.audio_z, win.audio_z), kept.raw)
                 merged = True

@@ -74,20 +74,36 @@ def _run_chunk(model, wav: Path, batch_size: int, language: str) -> list[dict]:
                 out.append({"s": round(seg.start, 3), "e": round(seg.end, 3), "t": text, "w": words})
         return out
 
+    # The samples are passed in directly. Letting faster-whisper open the file
+    # goes through PyAV, whose current release rejects an argument it passes.
+    samples = _read_wav(wav)
     size = batch_size
     while size > 1:
         try:
             pipeline = BatchedInferencePipeline(model=model)
-            segments, _ = pipeline.transcribe(str(wav), batch_size=size, language=language,
+            segments, _ = pipeline.transcribe(samples, batch_size=size, language=language,
                                               word_timestamps=True)
             return collect(segments)
         except RuntimeError as exc:
             if "out of memory" not in str(exc).lower():
                 raise
             size //= 2  # not enough VRAM for this batch; try a smaller one
-    segments, _ = model.transcribe(str(wav), language=language, word_timestamps=True,
+    segments, _ = model.transcribe(samples, language=language, word_timestamps=True,
                                    vad_filter=True, beam_size=5)
     return collect(segments)
+
+
+def _read_wav(path: Path):
+    """Load a 16 kHz mono 16-bit WAV as float32 samples in -1..1."""
+    import wave
+
+    import numpy as np
+
+    with wave.open(str(path), "rb") as handle:
+        if handle.getframerate() != audio.SAMPLE_RATE or handle.getnchannels() != 1:
+            raise ValueError(f"{path} is not 16 kHz mono")
+        raw = handle.readframes(handle.getnframes())
+    return np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
 
 
 def transcribe(path: Path, model_name: str = "medium", compute_type: str = "int8_float16",
@@ -130,8 +146,37 @@ def transcribe(path: Path, model_name: str = "medium", compute_type: str = "int8
                 progress(done / audio_seconds if audio_seconds else 1.0)
     wall = time.perf_counter() - started
     segments.sort(key=lambda s: s["s"])
+    words = [w for seg in segments for w in seg["w"]]
     stats = TranscribeStats(audio_seconds, wall, device, model_name, ctype)
-    return {"segments": segments}, stats
+    return {"segments": split_sentences(words)}, stats
+
+
+def split_sentences(words: list[list], max_gap_s: float = 1.0, max_len_s: float = 25.0) -> list[dict]:
+    """Regroup words into sentences.
+
+    The batched model returns blocks of up to 30 seconds, which are useless as
+    clip boundaries. A sentence ends at closing punctuation, at a pause longer
+    than ``max_gap_s``, or once it has run for ``max_len_s``.
+    """
+    sentences: list[dict] = []
+    current: list[list] = []
+
+    def flush() -> None:
+        if current:
+            sentences.append({"s": current[0][0], "e": current[-1][1],
+                              "t": " ".join(w[2] for w in current), "w": list(current)})
+            current.clear()
+
+    for index, word in enumerate(words):
+        if current and word[0] - current[-1][1] > max_gap_s:
+            flush()
+        current.append(word)
+        nxt = words[index + 1] if index + 1 < len(words) else None
+        ends_sentence = word[2].rstrip('"\')').endswith((".", "?", "!"))
+        too_long = word[1] - current[0][0] >= max_len_s
+        if ends_sentence or too_long or nxt is None:
+            flush()
+    return sentences
 
 
 def audio_duration(path: Path) -> float:

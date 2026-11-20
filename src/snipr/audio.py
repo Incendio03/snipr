@@ -59,32 +59,41 @@ def to_wav(src: Path, dst: Path, start: float | None = None, duration: float | N
     return dst
 
 
-def find_offset(reference: Path, ref_start: float, segment: Path, max_lag_s: float = 8.0,
-                probe_s: float = 30.0) -> float:
+def measure_offset(reference: Path, ref_start: float, segment: Path, max_lag_s: float = 8.0,
+                   probe_s: float = 30.0, segment_skip: float = 0.0) -> tuple[float, float]:
     """Where ``segment`` really starts on the timeline of ``reference``.
 
     A downloaded section is cut on keyframes, so it can begin a little before
     or after the time that was asked for. Both files hold the same sound, so
     the lag that best lines up their loudness envelopes gives the true start.
-    Returns the start time in seconds on the reference timeline; falls back to
-    ``ref_start`` when the two do not correlate.
+
+    ``segment_skip`` starts the comparison that many seconds into the segment,
+    for a segment that begins before the reference does. Returns
+    ``(start time on the reference timeline, match quality 0..1)``; the quality
+    is 0 when the two could not be compared and ``ref_start`` is returned as is.
     """
     hop = 0.01
-    seg = energy_curve(segment, hop_s=hop, duration=probe_s)
-    lead = max(0.0, ref_start - max_lag_s)
-    ref = energy_curve(reference, hop_s=hop, start=lead, duration=probe_s + 2 * max_lag_s)
+    seg = energy_curve(segment, hop_s=hop, start=segment_skip or None, duration=probe_s)
+    anchor = ref_start + segment_skip              # reference time the probe should match
+    lead = max(0.0, anchor - max_lag_s)
+    ref = energy_curve(reference, hop_s=hop, start=lead or None, duration=probe_s + 2 * max_lag_s)
     if seg.size < 200 or ref.size < seg.size:
-        return ref_start
+        return ref_start, 0.0
     seg_n = seg - seg.mean()
     ref_n = ref - ref.mean()
     corr = np.correlate(ref_n, seg_n, mode="valid")
     if corr.size == 0:
-        return ref_start
+        return ref_start, 0.0
     # Normalise by the local energy of the reference so a loud stretch cannot win by volume.
     window = np.ones(seg_n.size, dtype=np.float32)
     local = np.sqrt(np.maximum(np.convolve(ref_n * ref_n, window, mode="valid"), 1e-6))
     quality = corr / (local * max(float(np.linalg.norm(seg_n)), 1e-6))
     best = int(np.argmax(quality))
-    if quality[best] < 0.5:
-        return ref_start
-    return lead + best * hop
+    return lead + best * hop - segment_skip, float(quality[best])
+
+
+def find_offset(reference: Path, ref_start: float, segment: Path, max_lag_s: float = 8.0,
+                probe_s: float = 30.0, segment_skip: float = 0.0) -> float:
+    """``measure_offset`` that falls back to ``ref_start`` on a poor match."""
+    offset, quality = measure_offset(reference, ref_start, segment, max_lag_s, probe_s, segment_skip)
+    return offset if quality >= 0.5 else ref_start
