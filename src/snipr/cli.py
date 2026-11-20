@@ -104,6 +104,25 @@ def cmd_clip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_set_key(args: argparse.ArgumentParser) -> int:
+    """Store the Anthropic API key in Windows Credential Manager."""
+    import getpass
+
+    from . import secrets
+
+    if args.clear:
+        secrets.delete("anthropic_api_key")
+        print("Removed the stored Anthropic API key.")
+        return 0
+    key = getpass.getpass("Paste the Anthropic API key (it will not be shown): ").strip()
+    if not key:
+        print("Nothing entered; the stored key is unchanged.")
+        return 1
+    secrets.put("anthropic_api_key", key)
+    print("Saved to Windows Credential Manager under 'snipr'.")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="snipr", description="Streamer VODs in, short clips out.")
     parser.add_argument("--version", action="version", version=f"snipr {__version__}")
@@ -123,6 +142,10 @@ def build_parser() -> argparse.ArgumentParser:
     clip.add_argument("--no-llm", action="store_true", help="pick on chat and loudness alone")
     clip.add_argument("--out", help="folder for the clips (default: the VOD's working folder)")
     clip.set_defaults(func=cmd_clip)
+
+    key = sub.add_parser("set-key", help="store the Anthropic API key in Windows Credential Manager")
+    key.add_argument("--clear", action="store_true", help="remove the stored key")
+    key.set_defaults(func=cmd_set_key)
     return parser
 
 

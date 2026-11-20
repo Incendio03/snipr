@@ -2,6 +2,16 @@
 
 Each milestone in `docs/design.md` gets a version bump and a git tag: milestone N is `v0.N.0`.
 
+## v0.2.0 — milestone 2: selection for all three modes
+
+- Claude provider behind two functions, `select_segments` and `write_metadata`; model `claude-haiku-5-5`.
+- Highlights: spikes nominate up to 15 windows, then one LLM request filters and trims them.
+- Informative and Custom: the whole transcript goes in one request with per-minute chat and loudness figures. Transcripts too long for one request are split and merged.
+- Content flags (slurs, sexual content, copyrighted music) come back with each segment.
+- Headline, title, description and hashtags are written per clip.
+- `snipr set-key` stores the API key in Windows Credential Manager.
+- **Not yet run against the live API**: no key is stored on this machine. Prompt building, response validation and error handling are covered by tests with a stand-in client. The milestone's own bar ("at least half the candidates are ones you would post") still needs a real run and your judgement.
+
 ## v0.1.0 — milestone 1: VOD link in, transcript and candidate clips out
 
 - `snipr clip <vod link>` downloads the audio, reads Twitch chat replay, transcribes with word timings and cuts candidate clips.
