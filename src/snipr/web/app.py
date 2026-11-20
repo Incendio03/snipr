@@ -373,7 +373,9 @@ def update_streamer(streamer_id: int, body: dict = Body(...)) -> dict:
         channel, _ = _resolve(str(body["channel_url"]))
         if channel.platform not in platforms.SUPPORTED:
             raise bad(f"{channel.platform.title()} is not supported yet.")
-        values.update(platform=channel.platform, channel_url=channel.url)
+        # A different channel counts as never checked, so only its latest stream is
+        # queued first instead of everything on the new channel's front page.
+        values.update(platform=channel.platform, channel_url=channel.url, last_checked_at=None)
     _apply_frame(values, body.get("frame_token"))
     db.update("streamers", streamer_id, values)
     return streamer_out(db.get("streamers", streamer_id))

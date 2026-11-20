@@ -53,6 +53,16 @@ def test_create_update_and_delete_a_streamer(client):
     assert client.put(f"/api/streamers/{streamer['id']}", json={"enabled": True}).status_code == 404
 
 
+def test_changing_the_channel_link_resets_the_first_check(client):
+    streamer = client.post("/api/streamers", json=_streamer_body()).json()
+    db.update("streamers", streamer["id"], {"last_checked_at": db.now()})
+    same = client.put(f"/api/streamers/{streamer['id']}", json={"channel_url": streamer["channel_url"], "games": "x"}).json()
+    assert same["stats"]["last_checked_at"] is not None           # same channel: nothing reset
+    moved = client.put(f"/api/streamers/{streamer['id']}", json={"channel_url": "https://www.youtube.com/@PixelMoth"}).json()
+    assert moved["platform"] == "youtube" and moved["channel_url"] == "https://www.youtube.com/@PixelMoth"
+    assert moved["stats"]["last_checked_at"] is None              # new channel: treated as never checked
+
+
 def test_streamer_validation_messages(client):
     def detail(**extra):
         response = client.post("/api/streamers", json=_streamer_body(**extra))
