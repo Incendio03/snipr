@@ -6,7 +6,7 @@ The full design is in [`docs/design.md`](docs/design.md). What changed in each v
 
 ## Run it
 
-From this folder:
+Double-click **Start Snipr.cmd** in this folder, or run:
 
 ```
 python -m uv run snipr serve --open
@@ -20,6 +20,15 @@ The first run on a new machine downloads the speech-to-text model (about 1.5 GB)
 
 - **Anthropic API key.** Paste it on the Settings page. Without one, Highlights mode still works on chat and loudness alone; Informative mode, Custom mode and automatic narration need the key.
 - **Posting.** Uploading is by hand for now: at each posting slot Snipr reminds you, and the Publishing page gives you the clip file and the text to copy.
+
+## Picking clips without an API key
+
+Snipr can find where a stream gets loud or chat speeds up on its own, but judging which of those moments are worth posting needs someone to read what was said. With an API key Claude does that automatically. Without one, there are two ways:
+
+- **Ask Claude Code.** Open Claude Code in this folder and say, for example, "pick clips from the latest stream of IShowSpeed" or paste a stream link. It runs `snipr nominate`, reads the candidate moments, chooses the good ones, writes the headline and post text, and puts them in your Review queue with `snipr import-picks`. This uses your Claude plan, not API credit, and only happens when you ask.
+- **Do it yourself.** Run `python -m uv run snipr nominate <stream link> --streamer-id 1`. It writes `nominations.txt` in the stream's folder under `data/vods`. Put your choices in a JSON file (a list of `start`, `end`, `score`, `title`, `headline`, `description`, `hashtags`) and run `python -m uv run snipr import-picks <stream link> picks.json --streamer-id 1`.
+
+Either way the clips arrive in Review like any others, where you still approve or reject each one.
 
 ## Requirements
 
