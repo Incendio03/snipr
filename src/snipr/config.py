@@ -22,7 +22,7 @@ DEFAULTS: dict[str, Any] = {
     "llm": {
         "provider": "anthropic",            # or "gemini"
         "model": "claude-haiku-5-5",
-        "gemini_model": "gemini-3.8-flash",
+        "gemini_model": "gemini-3.5-flash-lite",
     },
     "selection": {
         "min_score": 0.6,

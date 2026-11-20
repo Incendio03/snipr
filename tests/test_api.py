@@ -413,7 +413,7 @@ def test_gemini_can_be_chosen_and_keys_are_kept_per_provider(client, monkeypatch
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
 
     start = client.get("/api/settings").json()["llm"]
-    assert start["provider"] == "anthropic" and start["gemini_model"] == "gemini-3.8-flash"
+    assert start["provider"] == "anthropic" and start["gemini_model"] == "gemini-3.5-flash-lite"
     assert start["key_set"] is False and start["gemini_key_set"] is False and "free tier" in start["gemini_note"]
 
     saved = client.post("/api/settings/api-key", json={"key": "AIza-test-key-123456789", "provider": "gemini"}).json()

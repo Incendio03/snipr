@@ -200,7 +200,7 @@ export function mount(root, ctx) {
       const geminiName = geminiModel.value.trim();
       if (!modelName) fail(errors.model, 'Write the model name, for example claude-haiku-5-5.', model);
       else put('llm', 'model', modelName, s.llm && s.llm.model);
-      if (!geminiName) fail(errors.model, 'Write the Gemini model name, for example gemini-3.8-flash.', geminiModel);
+      if (!geminiName) fail(errors.model, 'Write the Gemini model name, for example gemini-3.5-flash-lite.', geminiModel);
       else put('llm', 'gemini_model', geminiName, s.llm && s.llm.gemini_model);
 
       const start = fmt.normaliseHHMM(windowStart.value);
@@ -317,7 +317,7 @@ export function mount(root, ctx) {
       field({ label: 'Claude model', control: model, help: 'Paid per use from Anthropic Console credit. A 3 hour stream costs around a cent or two on the small model.' }));
     geminiPane.append(
       geminiKey.el,
-      field({ label: 'Gemini model', control: geminiModel, help: 'gemini-3.8-flash, gemini-3.6-flash and gemini-3.5-flash-lite have a free tier. Get a key in Google AI Studio (aistudio.google.com), under "Get API key".' }),
+      field({ label: 'Gemini model', control: geminiModel, help: 'gemini-3.5-flash-lite is the default because it reliably answers on the free tier. gemini-3.8-flash and gemini-3.6-flash are stronger but are often overloaded there; if the chosen model is too busy, Snipr falls back to a Flash-Lite model by itself. Get a key in Google AI Studio (aistudio.google.com), under "Get API key".' }),
       notice('warn', (saved.llm && saved.llm.gemini_note) || 'On the free tier, Google uses what is sent to improve its products.'));
 
     replace(body, form);

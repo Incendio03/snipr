@@ -407,7 +407,13 @@ class AnthropicProvider(Provider):
 
 
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-GEMINI_DEFAULT_MODEL = "gemini-3.8-flash"
+# The Flash-Lite model is the default because it is the one that reliably answers on the
+# free tier; the larger Flash models were overloaded when this was first run.
+GEMINI_DEFAULT_MODEL = "gemini-3.5-flash-lite"
+
+
+class _Overloaded(Exception):
+    """A Gemini model is too busy to answer. Another model may still work."""
 
 
 @dataclass
@@ -427,6 +433,11 @@ class GeminiProvider(Provider):
     max_transcript_tokens = 150_000
     rate_limit_waits_s = (65, 65)            # pauses after a 429 before the request counts as failed
     unavailable_waits_s = (8, 25)            # pauses after a 500 or 503
+    request_timeout_s = 600.0                # a long transcript can take minutes to answer
+    # Tried in order when the chosen model stays overloaded. Both answered within two
+    # seconds on 2026-11-21 while gemini-3.8-flash and gemini-3.6-flash were refusing.
+    fallback_models = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
+    fallbacks_used: list = field(default_factory=list)
 
     def _parts(self, prompt: str | list) -> list[dict]:
         if isinstance(prompt, str):
@@ -440,32 +451,35 @@ class GeminiProvider(Provider):
                 parts.append({"text": block.get("text", "")})
         return parts
 
-    def _post(self, body: dict):
+    def _post(self, body: dict, model: str | None = None):
         import httpx
 
-        return httpx.post(f"{GEMINI_URL}/{self.model}:generateContent", json=body,
+        return httpx.post(f"{GEMINI_URL}/{model or self.model}:generateContent", json=body,
                           headers={"x-goog-api-key": self.api_key or "", "Content-Type": "application/json"},
-                          timeout=httpx.Timeout(600.0, connect=20.0))
+                          timeout=httpx.Timeout(self.request_timeout_s, connect=20.0))
 
-    def _ask(self, purpose: str, system: str, prompt: str | list, schema: dict, max_tokens: int) -> dict:
-        import httpx
+    def _send(self, body: dict, model: str, patient: bool):
+        """Send one request to one model, waiting out what is worth waiting for.
 
-        body = {
-            "systemInstruction": {"parts": [{"text": system}]},
-            "contents": [{"role": "user", "parts": self._parts(prompt)}],
-            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
-                                 "maxOutputTokens": max_tokens},
-        }
+        Two kinds of answer are waited out: "slow down" (429), where the
+        per-minute allowance refills, and "unavailable" (500, 503), where
+        Google's side is briefly overloaded. A model that stays overloaded or
+        does not answer raises ``_Overloaded`` so another model can be tried.
+        Anything else fails straight away.
+        """
         import time
 
-        # Two kinds of answer are worth waiting out: "slow down" (429), where the
-        # per-minute allowance refills, and "unavailable" (500, 503), where Google's
-        # side is briefly overloaded. Anything else fails straight away.
+        import httpx
+
         slow_waits = list(self.rate_limit_waits_s)
-        busy_waits = list(self.unavailable_waits_s)
+        busy_waits = list(self.unavailable_waits_s) if patient else list(self.unavailable_waits_s[:1])
         while True:
             try:
-                response = self._post(body)
+                response = self._post(body, model)
+            except httpx.TimeoutException as exc:
+                raise _Overloaded(f"Gemini ({model}) did not answer within {self.request_timeout_s:.0f} seconds. "
+                                  "It is probably overloaded; try again later or switch to another Gemini "
+                                  "model in Settings.") from exc
             except httpx.HTTPError as exc:
                 raise LLMError("Could not reach the Gemini API. Check the internet connection.") from exc
             if response.status_code == 429 and slow_waits:
@@ -476,12 +490,38 @@ class GeminiProvider(Provider):
                 time.sleep(busy_waits.pop(0))
             else:
                 break
+        if response.status_code in (500, 503):
+            raise _Overloaded(self._error_text(response))
         if response.status_code != 200:
             raise LLMError(self._error_text(response))
+        return response
+
+    def _ask(self, purpose: str, system: str, prompt: str | list, schema: dict, max_tokens: int) -> dict:
+        body = {
+            "systemInstruction": {"parts": [{"text": system}]},
+            "contents": [{"role": "user", "parts": self._parts(prompt)}],
+            "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
+                                 "maxOutputTokens": max_tokens},
+        }
+        # The chosen model first. If it stays overloaded, the lighter free models are
+        # tried so an unattended job is not lost to a busy hour on Google's side.
+        candidates = [self.model] + [m for m in self.fallback_models if m != self.model]
+        response, answered_by, first_problem = None, self.model, None
+        for position, model in enumerate(candidates):
+            try:
+                response = self._send(body, model, patient=position == 0)
+                answered_by = model
+                break
+            except _Overloaded as exc:
+                first_problem = first_problem or exc
+        if response is None:
+            raise LLMError(str(first_problem))
+        if answered_by != self.model:
+            self.fallbacks_used.append(answered_by)
         data = response.json()
 
         used = data.get("usageMetadata") or {}
-        self.usage.append({"purpose": purpose, "model": self.model,
+        self.usage.append({"purpose": purpose, "model": answered_by,
                            "input_tokens": int(used.get("promptTokenCount") or 0),
                            "output_tokens": int(used.get("candidatesTokenCount") or 0)
                                             + int(used.get("thoughtsTokenCount") or 0)})
@@ -650,6 +690,9 @@ def check_provider(settings: dict) -> dict:
         raise LLMError("No API key is stored for the selected provider.")
     schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"],
               "additionalProperties": False}
+    if hasattr(provider, "request_timeout_s"):
+        provider.request_timeout_s = 45.0        # a test button must not sit there for ten minutes
+        provider.unavailable_waits_s = (5,)
     provider._ask("check", "You are a connection test. Answer with the JSON asked for and nothing else.",
                   'Reply with {"ok": true}.', schema, 2000)
     return {"ok": True, "provider": provider_name(settings), "model": provider.model}

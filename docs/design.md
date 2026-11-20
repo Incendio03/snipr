@@ -266,7 +266,7 @@ Export comes first so that publishing never depends on a platform approving an A
 
 | | Claude | Gemini |
 |---|---|---|
-| Default model | `claude-haiku-5-5` | `gemini-3.8-flash` |
+| Default model | `claude-haiku-5-5` | `gemini-3.5-flash-lite` (the larger Flash models are often overloaded on the free tier; Snipr falls back to a Flash-Lite model when the chosen one is too busy) |
 | Cost | Paid per use from prepaid credit; cents per stream | Has a free tier with daily limits |
 | What is sent used for training | No | On the free tier, yes (per Google's pricing page on 2026-11-20). Not on the paid tier |
 

@@ -232,9 +232,10 @@ def _gemini(monkeypatch, response):
     provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
     provider.rate_limit_waits_s = (0, 0)             # tests never wait out a real minute
     provider.unavailable_waits_s = (0, 0)
+    provider.fallback_models = ()                    # one model only, unless a test is about fallback
     sent = {}
 
-    def fake_post(body):
+    def fake_post(body, model=None):
         sent["body"] = body
         return response
 
@@ -302,14 +303,14 @@ def test_gemini_waits_out_a_rate_limit_and_sends_long_transcripts_in_parts(monke
     answers = [FakeResponse(429, {"error": {"message": "quota"}}),
                _gemini_answer({"segments": []})]
     calls = []
-    monkeypatch.setattr(provider, "_post", lambda body: (calls.append(body), answers.pop(0))[1])
+    monkeypatch.setattr(provider, "_post", lambda body, model=None: (calls.append(body), answers.pop(0))[1])
     assert provider.select_segments(_request(), None) == []
     assert len(calls) == 2                                      # tried again after the "slow down"
 
     # Three refusals in a row is a real failure, reported as a rate limit.
     stuck = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
     stuck.rate_limit_waits_s = (0, 0)
-    monkeypatch.setattr(stuck, "_post", lambda body: FakeResponse(429, {"error": {"message": "quota"}}))
+    monkeypatch.setattr(stuck, "_post", lambda body, model=None: FakeResponse(429, {"error": {"message": "quota"}}))
     with pytest.raises(llm.LLMError, match="rate limit"):
         stuck.select_segments(_request(), None)
 
@@ -322,17 +323,49 @@ def test_gemini_retries_when_google_is_briefly_unavailable(monkeypatch):
     provider.rate_limit_waits_s = provider.unavailable_waits_s = (0, 0)
     answers = [FakeResponse(503, {}), FakeResponse(500, {}), _gemini_answer({"segments": []})]
     calls = []
-    monkeypatch.setattr(provider, "_post", lambda body: (calls.append(1), answers.pop(0))[1])
+    monkeypatch.setattr(provider, "_post", lambda body, model=None: (calls.append(1), answers.pop(0))[1])
     assert provider.select_segments(_request(), None) == []
     assert len(calls) == 3                                      # two "unavailable" answers were waited out
 
     down = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
     down.rate_limit_waits_s = down.unavailable_waits_s = (0, 0)
     tries = []
-    monkeypatch.setattr(down, "_post", lambda body: (tries.append(1), FakeResponse(503, {}))[1])
+    down.fallback_models = ()
+    monkeypatch.setattr(down, "_post", lambda body, model=None: (tries.append(1), FakeResponse(503, {}))[1])
     with pytest.raises(llm.LLMError, match="temporarily unavailable"):
         down.select_segments(_request(), None)
     assert len(tries) == 3                                      # gives up after the two waits
+
+
+def test_gemini_falls_back_to_a_lighter_model_when_the_chosen_one_is_overloaded(monkeypatch):
+    provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    provider.rate_limit_waits_s = provider.unavailable_waits_s = (0, 0)
+    asked = []
+
+    def fake_post(body, model=None):
+        asked.append(model)
+        if model == "gemini-3.8-flash":
+            return FakeResponse(503, {"error": {"message": "This model is currently experiencing high demand."}})
+        return _gemini_answer({"segments": []})
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    assert provider.select_segments(_request(), None) == []
+    assert asked == ["gemini-3.8-flash"] * 3 + ["gemini-3.5-flash-lite"]      # patient with the first, then moved on
+    assert provider.fallbacks_used == ["gemini-3.5-flash-lite"]
+    assert provider.usage[-1]["model"] == "gemini-3.5-flash-lite"             # usage is logged against what answered
+
+    # When every model is overloaded, the error is the chosen model's, in Google's words.
+    monkeypatch.setattr(provider, "_post", lambda body, model=None: FakeResponse(
+        503, {"error": {"message": "This model is currently experiencing high demand."}}))
+    with pytest.raises(llm.LLMError, match="Google says: This model is currently experiencing high demand"):
+        provider.select_segments(_request(), None)
+
+    # A wrong key or a bad request is not a reason to try other models.
+    asked.clear()
+    monkeypatch.setattr(provider, "_post", lambda body, model=None: (asked.append(model), FakeResponse(403, {}))[1])
+    with pytest.raises(llm.LLMError, match="key was rejected"):
+        provider.select_segments(_request(), None)
+    assert asked == ["gemini-3.8-flash"]
 
 
 def test_gemini_reads_how_long_google_asks_it_to_wait():
@@ -356,7 +389,7 @@ def test_provider_follows_the_setting_and_its_own_key(monkeypatch):
     # Claude is selected but only a Gemini key exists: nothing is available, and the keys do not mix.
     claude = {"llm": {"provider": "anthropic", "model": "claude-haiku-5-5"}}
     assert llm.get_provider(claude) is None and llm.api_key(claude) is None
-    assert llm.model_for({"llm": {}}, "gemini") == "gemini-3.8-flash"
+    assert llm.model_for({"llm": {}}, "gemini") == "gemini-3.5-flash-lite"
 
 
 def test_no_key_means_no_provider(monkeypatch):
