@@ -544,3 +544,5 @@ def test_index_and_missing_media(client):
     assert page.status_code == 200 and "text/html" in page.headers["content-type"]
     script = client.get("/static/js/main.js")
     assert script.status_code == 200 and "javascript" in script.headers["content-type"]
+    # The browser must ask for a newer copy every time, or an update stays invisible until a hard refresh.
+    assert script.headers["cache-control"] == "no-cache" and page.headers["cache-control"] == "no-cache"

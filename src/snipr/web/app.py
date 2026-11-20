@@ -1075,5 +1075,20 @@ def index():
     return FileResponse(page, media_type="text/html", headers={"Cache-Control": "no-cache"})
 
 
+class FreshStaticFiles(StaticFiles):
+    """The page's own files, always checked for a newer copy.
+
+    Without this the browser keeps scripts for a while on its own judgement, and
+    after an update a normal reload shows the old page: a feature that exists on
+    the server is simply missing on screen. "no-cache" still lets the browser
+    reuse an unchanged file; it only has to ask first.
+    """
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 app.mount("/static/fonts", StaticFiles(directory=FONT_DIR), name="fonts")
-app.mount("/static", StaticFiles(directory=STATIC_DIR, check_dir=False), name="static")
+app.mount("/static", FreshStaticFiles(directory=STATIC_DIR, check_dir=False), name="static")
