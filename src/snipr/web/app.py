@@ -541,8 +541,12 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
 
 
 @app.post("/api/clips/{clip_id}/write-narration")
-def write_clip_narration(clip_id: int) -> dict:
-    """Have the LLM draft a voiceover script for a clip. The draft is returned, not saved."""
+def write_clip_narration(clip_id: int, body: dict = Body(default={})) -> dict:
+    """Have the LLM draft a voiceover script for a clip. The draft is returned, not saved.
+
+    ``instructions`` in the body is the reviewer's own direction for how to narrate.
+    """
+    instructions = _instructions(body)
     clip = _need("clips", clip_id, "clip")
     vod = db.get("vods", clip["vod_id"])
     streamer = db.get("streamers", vod["streamer_id"])
@@ -555,14 +559,97 @@ def write_clip_narration(clip_id: int) -> dict:
         raise bad("The footage for this clip has been cleaned up, so a narration cannot be drafted from it. "
                   "You can still type one.", 409)
     try:
-        script = worker.write_narration(clip, vod, streamer, transcribe.load(folder / "transcript.json"), provider)
+        script = worker.write_narration(clip, vod, streamer, transcribe.load(folder / "transcript.json"), provider,
+                                        instructions=instructions)
     except llm.LLMError as exc:
         raise bad(str(exc), 502) from exc
-    db.execute("UPDATE vods SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, "
-               "llm_requests = llm_requests + ? WHERE id = ?",
-               (*[provider.total_tokens()[k] for k in ("input_tokens", "output_tokens", "requests")], vod["id"]))
+    _count_tokens(provider, vod["id"])
     return {"narration": script, "words": len(script.split()),
             "word_budget": voice.word_budget(clip["end_s"] - clip["start_s"])}
+
+
+def _instructions(body: dict) -> str:
+    text = body.get("instructions") or ""
+    if not isinstance(text, str):
+        raise bad("The narration instructions must be text.")
+    if len(text) > 1500:
+        raise bad("The narration instructions are too long. Keep them under 1,500 characters.")
+    return text.strip()
+
+
+def _count_tokens(provider, vod_id: int) -> None:
+    total = provider.total_tokens()
+    db.execute("UPDATE vods SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, "
+               "llm_requests = llm_requests + ? WHERE id = ?",
+               (total["input_tokens"], total["output_tokens"], total["requests"], vod_id))
+
+
+@app.post("/api/clips/{clip_id}/rewrite-narration")
+def rewrite_clip_narration(clip_id: int, body: dict = Body(...)) -> dict:
+    """Have the LLM rework a narration the reviewer typed. Returned, not saved."""
+    instructions = _instructions(body)
+    draft = " ".join(str(body.get("text") or "").split())
+    if not draft:
+        raise bad("Type a narration first; there is nothing to rewrite.")
+    clip = _need("clips", clip_id, "clip")
+    vod = db.get("vods", clip["vod_id"])
+    streamer = db.get("streamers", vod["streamer_id"])
+    provider = llm.get_provider(config.load_settings())
+    if provider is None:
+        raise bad("Rewriting needs a Claude or Gemini API key. Add one in Settings.", 409)
+    start = float(body.get("start_s", clip["start_s"])) if isinstance(body.get("start_s"), (int, float)) else clip["start_s"]
+    end = float(body.get("end_s", clip["end_s"])) if isinstance(body.get("end_s"), (int, float)) else clip["end_s"]
+    length = max(5.0, end - start)
+    folder = pipeline.vod_dir(VodInfo(vod["platform"], vod["vod_key"], vod["source_url"], vod["title"], vod["duration"]))
+    spoken = ""
+    if (folder / "transcript.json").exists():
+        spoken = transcribe.text_between(transcribe.load(folder / "transcript.json"), start, end)
+    budget = voice.word_budget(length)
+    try:
+        script = provider.rewrite_narration(draft, spoken, length, budget, instructions, streamer["name"])
+    except llm.LLMError as exc:
+        raise bad(str(exc), 502) from exc
+    _count_tokens(provider, vod["id"])
+    return {"narration": script, "words": len(script.split()), "word_budget": budget}
+
+
+# --------------------------------------------------------------------------- narration templates
+
+def _template_fields(body: dict) -> dict:
+    name = " ".join(str(body.get("name") or "").split())
+    prompt = str(body.get("prompt") or "").strip()
+    if not name:
+        raise bad("Give the template a name.")
+    if len(name) > 60:
+        raise bad("Keep the template name under 60 characters.")
+    if not prompt:
+        raise bad("Write the narration instructions to save.")
+    if len(prompt) > 1500:
+        raise bad("The narration instructions are too long. Keep them under 1,500 characters.")
+    return {"name": name, "prompt": prompt}
+
+
+@app.get("/api/narration-templates")
+def list_templates() -> list[dict]:
+    return db.rows("SELECT id, name, prompt FROM narration_templates ORDER BY name COLLATE NOCASE")
+
+
+@app.post("/api/narration-templates", status_code=201)
+def create_template(body: dict = Body(...)) -> dict:
+    values = _template_fields(body)
+    same = db.row("SELECT id FROM narration_templates WHERE name = ? COLLATE NOCASE", (values["name"],))
+    if same:                                    # saving under an existing name updates it
+        db.update("narration_templates", same["id"], values)
+        return db.row("SELECT id, name, prompt FROM narration_templates WHERE id = ?", (same["id"],))
+    new_id = db.insert("narration_templates", {**values, "created_at": db.now()})
+    return db.row("SELECT id, name, prompt FROM narration_templates WHERE id = ?", (new_id,))
+
+
+@app.delete("/api/narration-templates/{template_id}", status_code=204)
+def delete_template(template_id: int) -> Response:
+    _need("narration_templates", template_id, "template")
+    db.execute("DELETE FROM narration_templates WHERE id = ?", (template_id,))
+    return Response(status_code=204)
 
 
 @app.get("/api/voices")

@@ -65,6 +65,11 @@ function query(params) {
 export const api = {
   state: () => get('/api/state'),
   voices: () => get('/api/voices'),
+  templates: {
+    list: () => get('/api/narration-templates'),
+    save: (name, prompt) => post('/api/narration-templates', { name, prompt }),
+    remove: (id) => del(`/api/narration-templates/${id}`),
+  },
 
   streamers: {
     list: () => get('/api/streamers'),
@@ -85,7 +90,8 @@ export const api = {
       post(`/api/clips/${id}/approve`, { destination_ids: destinationIds, post_now: Boolean(postNow) }),
     reject: (id, reason) => post(`/api/clips/${id}/reject`, { reason: reason ?? null }),
     restore: (id) => post(`/api/clips/${id}/restore`),
-    writeNarration: (id) => post(`/api/clips/${id}/write-narration`),
+    writeNarration: (id, instructions = '') => post(`/api/clips/${id}/write-narration`, { instructions }),
+    rewriteNarration: (id, body) => post(`/api/clips/${id}/rewrite-narration`, body),
   },
 
   destinations: {

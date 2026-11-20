@@ -203,6 +203,31 @@ def test_write_narration_sends_frames_in_order_with_the_word_budget(tmp_path):
     assert provider.usage[-1]["purpose"] == "narration"
 
 
+def test_narration_style_reaches_the_prompt_without_loosening_the_rules(tmp_path):
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"\xff\xd8jpeg")
+    provider, client = _provider([{"script": "Goal."}, {"script": "Goal."}])
+    provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6",
+                             instructions="  Hype sports\ncommentator. ")
+    text = client.calls[0]["messages"][0]["content"][-1]["text"]
+    assert "<narration_style>\nHype sports commentator.\n</narration_style>" in text
+    assert "does not change the word budget" in text and "does not permit saying anything" in text
+    provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6")
+    assert "narration_style" not in client.calls[1]["messages"][0]["content"][-1]["text"]
+    assert llm.style_block("") == "" and llm.style_block(None) == ""
+    assert len(llm.style_block("x" * 5000)) < 1900                          # capped
+
+
+def test_rewrite_keeps_the_draft_and_the_budget_in_front_of_the_model():
+    provider, client = _provider([{"script": "Speed walks straight into the water. " * 30}])
+    out = provider.rewrite_narration("speed walks in the water", "Oh my god!", 20.0, 49, "calm", "IShowSpeed")
+    prompt = client.calls[0]["messages"][0]["content"]
+    assert "<draft>\nspeed walks in the water\n</draft>" in prompt and "Word budget: 49 words" in prompt
+    assert "Keep what it says" in prompt and "<narration_style>\ncalm\n</narration_style>" in prompt
+    assert len(out.split()) <= 54                                           # an over-long answer is trimmed to fit
+    assert client.calls[0]["system"][0]["text"] == llm.NARRATION_SYSTEM
+
+
 def test_narration_over_budget_is_cut_at_a_sentence_end():
     script = "One two three four five. Six seven eight nine ten. Eleven twelve thirteen fourteen fifteen."
     assert llm.clean_narration(script, 20) == script

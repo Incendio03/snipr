@@ -192,6 +192,57 @@ def test_voiceover_on_a_clip_needs_a_narration_that_fits(client, seeded):
     assert client.put(f"/api/clips/{clip_id}", json={"narration": "Kept for later."}).json()["render_state"] == "ready"
 
 
+def test_narration_templates_can_be_saved_updated_and_deleted(client):
+    assert client.get("/api/narration-templates").json() == []
+    hype = client.post("/api/narration-templates", json={"name": " Hype  caster ", "prompt": "Short punchy lines."})
+    assert hype.status_code == 201 and hype.json()["name"] == "Hype caster"
+    client.post("/api/narration-templates", json={"name": "Calm explainer", "prompt": "Slow and clear."})
+    assert [t["name"] for t in client.get("/api/narration-templates").json()] == ["Calm explainer", "Hype caster"]
+
+    # Saving under a name that exists updates that template instead of making a twin.
+    again = client.post("/api/narration-templates", json={"name": "hype caster", "prompt": "Even punchier."}).json()
+    assert again["id"] == hype.json()["id"] and again["prompt"] == "Even punchier."
+    assert len(client.get("/api/narration-templates").json()) == 2
+
+    assert client.post("/api/narration-templates", json={"name": "", "prompt": "x"}).status_code == 422
+    assert client.post("/api/narration-templates", json={"name": "x", "prompt": " "}).status_code == 422
+    assert client.post("/api/narration-templates", json={"name": "x", "prompt": "y" * 1501}).status_code == 422
+    assert client.delete(f"/api/narration-templates/{again['id']}").status_code == 204
+    assert client.delete(f"/api/narration-templates/{again['id']}").status_code == 404
+    assert [t["name"] for t in client.get("/api/narration-templates").json()] == ["Calm explainer"]
+
+
+def test_rewrite_uses_the_typed_text_the_style_and_the_unsaved_cut(client, seeded, monkeypatch):
+    from snipr import llm
+
+    clip_id = seeded["clips"][0]
+    no_key = client.post(f"/api/clips/{clip_id}/rewrite-narration", json={"text": "Speed walks in."})
+    assert no_key.status_code == 409 and "API key" in no_key.json()["detail"]
+
+    seen = {}
+
+    class Fake:
+        def rewrite_narration(self, draft, clip_text, clip_seconds, word_budget, instructions, streamer):
+            seen.update(draft=draft, seconds=clip_seconds, budget=word_budget, instructions=instructions, streamer=streamer)
+            return "Speed walks straight in."
+
+        def total_tokens(self):
+            return {"input_tokens": 50, "output_tokens": 9, "requests": 1}
+
+    monkeypatch.setattr(llm, "get_provider", lambda settings: Fake())
+    result = client.post(f"/api/clips/{clip_id}/rewrite-narration",
+                         json={"text": "  Speed   walks in. ", "instructions": "hype caster", "start_s": 8048.0, "end_s": 8078.0}).json()
+    assert result == {"narration": "Speed walks straight in.", "words": 4, "word_budget": 75}
+    assert seen == {"draft": "Speed walks in.", "seconds": 30.0, "budget": 75, "instructions": "hype caster",
+                    "streamer": "pixelmoth"}
+    assert db.get("vods", seeded["vod"])["llm_requests"] == 1                # usage is counted
+    assert client.get(f"/api/clips/{clip_id}").json()["narration"] == ""     # nothing was saved
+
+    assert client.post(f"/api/clips/{clip_id}/rewrite-narration", json={"text": "  "}).status_code == 422
+    assert client.post(f"/api/clips/{clip_id}/rewrite-narration", json={"text": "x", "instructions": "y" * 1501}).status_code == 422
+    assert client.post(f"/api/clips/{clip_id}/write-narration", json={"instructions": 5}).status_code == 422
+
+
 def test_drafting_a_narration_needs_a_key(client, seeded):
     response = client.post(f"/api/clips/{seeded['clips'][0]}/write-narration")
     assert response.status_code == 409 and "API key" in response.json()["detail"]

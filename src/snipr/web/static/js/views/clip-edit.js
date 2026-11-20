@@ -313,15 +313,75 @@ export function mount(root, ctx) {
     const countEl = h('span', { class: 'count', role: 'status' });
     const narrationError = errorLine();
     const writeBtn = h('button', { type: 'button', class: 'btn' }, 'Write narration');
+    const rewriteBtn = h('button', { type: 'button', class: 'btn' }, 'Rewrite mine');
     const writeHint = h('span', { class: 'help' });
     const writeStatus = h('div', { hidden: true, 'aria-live': 'polite' });
     let serverBudget = null; // from the last write-narration answer, used if /api/voices did not load
+
+    // How to narrate: the reviewer's own directions, reusable as named templates.
+    const style = h('textarea', { class: 'input', rows: '3', maxlength: '1500',
+      placeholder: 'For example: hype sports commentator, short punchy sentences, end on a question for the viewer.' });
+    const templateSelect = h('select', { class: 'input' });
+    const templateName = h('input', { type: 'text', class: 'input', maxlength: '60', placeholder: 'Template name' });
+    const templateSave = h('button', { type: 'button', class: 'btn btn--small' }, 'Save as template');
+    const templateDelete = h('button', { type: 'button', class: 'btn btn--text btn--small' }, 'Delete template');
+    const templateNote = h('span', { class: 'help', role: 'status' });
+    let templates = [];
+    function paintTemplates(selectedId = '') {
+      replace(templateSelect,
+        h('option', { value: '' }, templates.length ? 'Choose a saved template' : 'No saved templates yet'),
+        templates.map((t) => h('option', { value: String(t.id) }, t.name)));
+      templateSelect.value = selectedId;
+      templateDelete.hidden = !templateSelect.value;
+    }
+    api.templates.list().then((list) => { if (alive) { templates = list ?? []; paintTemplates(); } },
+      (err) => { if (alive) templateNote.textContent = `Templates did not load: ${err.message}`; });
+    templateSelect.addEventListener('change', () => {
+      const chosen = templates.find((t) => String(t.id) === templateSelect.value);
+      if (chosen) { style.value = chosen.prompt; templateName.value = chosen.name; }
+      templateDelete.hidden = !templateSelect.value;
+      templateNote.textContent = '';
+    });
+    templateSave.addEventListener('click', async () => {
+      templateNote.textContent = '';
+      const name = templateName.value.trim();
+      if (!style.value.trim()) { templateNote.textContent = 'Write the instructions first.'; style.focus(); return; }
+      if (!name) { templateNote.textContent = 'Give the template a name.'; templateName.focus(); return; }
+      try {
+        const saved = await withBusy(templateSave, () => api.templates.save(name, style.value.trim()));
+        if (!alive || !saved) return;
+        templates = [...templates.filter((t) => t.id !== saved.id), saved].sort((a, b) => a.name.localeCompare(b.name));
+        paintTemplates(String(saved.id));
+        templateNote.textContent = `Saved as "${saved.name}". Saving again under the same name updates it.`;
+      } catch (err) {
+        if (alive) templateNote.textContent = err.message;
+      }
+    });
+    templateDelete.addEventListener('click', async () => {
+      const id = Number(templateSelect.value);
+      if (!id) return;
+      try {
+        await withBusy(templateDelete, () => api.templates.remove(id));
+        if (!alive) return;
+        templates = templates.filter((t) => t.id !== id);
+        paintTemplates();
+        templateNote.textContent = 'Template deleted. The instructions above are left as they are.';
+      } catch (err) {
+        if (alive) templateNote.textContent = err.message;
+      }
+    });
+
     const voiceCtl = voiceoverControls({ value: m.voice, voices, onChange: (next) => { m.voice = next; validate(); } });
     const voiceBody = h('div', { class: 'voice-grid' },
       h('div', { class: 'block' },
         field({ label: 'Narration', control: narration, help: countEl }),
         narrationError,
-        h('div', { class: 'row row--tight' }, writeBtn, writeHint),
+        field({ label: 'How to narrate', control: style, help: 'Optional. Your directions for tone and style. Used by Write narration and Rewrite mine.' }),
+        h('div', { class: 'row row--tight' }, templateSelect, templateDelete),
+        h('div', { class: 'row row--tight' }, templateName, templateSave),
+        templateNote,
+        h('div', { class: 'row row--tight' }, writeBtn, rewriteBtn),
+        writeHint,
         writeStatus),
       voiceCtl.optionsEl);
     const voiceSection = h('section', { class: 'section' },
@@ -348,31 +408,40 @@ export function mount(root, ctx) {
       writeHint.textContent = state && state.llm_ready === false
         ? 'Writing one automatically needs an API key. You can still type a narration by hand.'
         : moved ? 'The draft is written for the saved start and end. Save first if you want it to match the new cut.'
-          : 'Drafts a script for this clip. Nothing is saved until you save.';
+          : 'Write narration drafts a new script. Rewrite mine reworks what you typed. Nothing is saved until you save.';
+      rewriteBtn.disabled = !narration.value.trim();
     }
     stopState = ctx.onState(() => { if (alive) paintVoice(); });
 
-    writeBtn.addEventListener('click', async () => {
+    async function draft(button, busyText, doneText, call) {
       const previous = narration.value;
       writeStatus.hidden = false;
       replace(writeStatus, h('div', { class: 'notice', role: 'status' }, h('span', { class: 'spinner', 'aria-hidden': 'true' }),
-        h('span', null, 'Writing a narration for this clip. This takes 5 to 20 seconds.')));
+        h('span', null, busyText)));
       try {
-        const result = await withBusy(writeBtn, () => api.clips.writeNarration(clip.id));
+        const result = await withBusy([writeBtn, rewriteBtn], call);
         if (!alive) return;
         narration.value = (result && result.narration) || '';
         if (result && result.word_budget != null && Number.isFinite(Number(result.word_budget))) serverBudget = Number(result.word_budget);
         const putBack = previous.trim() && previous !== narration.value
           ? h('button', { type: 'button', class: 'btn btn--text btn--small', onclick: () => { narration.value = previous; writeStatus.hidden = true; validate(); narration.focus(); } }, 'Put back what was there')
           : null;
-        replace(writeStatus, h('div', { class: 'notice' }, h('span', null, 'Draft written. Edit it if you like, then save. ', putBack)));
+        replace(writeStatus, h('div', { class: 'notice' }, h('span', null, doneText, putBack)));
         narration.focus();
       } catch (err) {
         if (!alive) return;
         replace(writeStatus, notice(err.status === 409 ? 'warn' : 'danger', `${err.message} You can still type a narration by hand.`));
       }
       validate();
-    });
+    }
+    writeBtn.addEventListener('click', () => draft(writeBtn,
+      'Writing a narration for this clip. This takes 5 to 20 seconds.',
+      'Draft written. Edit it if you like, then save. ',
+      () => api.clips.writeNarration(clip.id, style.value.trim())));
+    rewriteBtn.addEventListener('click', () => draft(rewriteBtn,
+      'Rewriting your narration. This takes a few seconds.',
+      'Rewritten. Edit it if you like, then save. ',
+      () => api.clips.rewriteNarration(clip.id, { text: narration.value, instructions: style.value.trim(), start_s: m.start, end_s: m.end })));
     narration.addEventListener('input', () => validate());
 
     const destSet = destResult.error

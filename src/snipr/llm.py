@@ -315,8 +315,27 @@ class Provider:
         answer = self._ask("metadata", METADATA_SYSTEM, prompt, METADATA_SCHEMA, 8000)
         return clean_metadata(answer)
 
+    def rewrite_narration(self, draft: str, clip_text: str, clip_seconds: float, word_budget: int,
+                          instructions: str = "", streamer: str = "") -> str:
+        """Rework a narration the reviewer typed: same content, better delivery, sized to the clip."""
+        prompt = "\n".join([
+            f"Streamer: {streamer or 'unknown'}",
+            f"Clip length: {clip_seconds:.0f} seconds",
+            f"Word budget: {word_budget} words",
+            "",
+            "Rewrite the narration draft below. Keep what it says and the order it says it in; improve how it "
+            "reads aloud, tighten it, and make it fit the word budget. Do not add events or facts that are not "
+            "in the draft or the clip transcript.",
+            style_block(instructions),
+            "<draft>", draft.strip(), "</draft>",
+            "", "<clip_transcript>", clip_text.strip() or "(no speech)", "</clip_transcript>",
+        ])
+        answer = self._ask("narration", NARRATION_SYSTEM, prompt, NARRATION_SCHEMA, 8000)
+        return clean_narration(answer.get("script", ""), word_budget)
+
     def write_narration(self, clip_text: str, frames: list, clip_seconds: float, word_budget: int,
-                        streamer: str, vod_title: str, working_title: str = "", game: str = "") -> str:
+                        streamer: str, vod_title: str, working_title: str = "", game: str = "",
+                        instructions: str = "") -> str:
         """A voiceover script for one clip, sized to ``word_budget`` words.
 
         ``frames`` are JPEG files from the clip in order. They are the one place
@@ -337,6 +356,7 @@ class Provider:
             f"Working title from selection: {working_title or 'none'}",
             f"Clip length: {clip_seconds:.0f} seconds",
             f"Word budget: {word_budget} words",
+            style_block(instructions),
             "", "<clip_transcript>", clip_text.strip() or "(no speech)", "</clip_transcript>",
         ])})
         answer = self._ask("narration", NARRATION_SYSTEM, content, NARRATION_SCHEMA, 8000)
@@ -618,6 +638,21 @@ def clean_metadata(raw: dict) -> dict:
         "description": str(raw.get("description") or "").strip(),
         "hashtags": tags[:5],
     }
+
+
+def style_block(instructions: str) -> str:
+    """The reviewer's own directions for how the narration should sound, or "" when there are none.
+
+    They shape tone, voice and structure. The word budget and the rule against
+    inventing facts still hold, and the block says so, because a style note
+    like "make it dramatic" must not turn into made-up events.
+    """
+    wanted = " ".join(str(instructions or "").split())[:1500]
+    if not wanted:
+        return ""
+    return ("\nThe reviewer has said how they want this narrated. Follow it for tone, voice, pacing and "
+            "structure. It does not change the word budget, and it does not permit saying anything the "
+            f"frames and transcript do not support.\n<narration_style>\n{wanted}\n</narration_style>")
 
 
 def clean_narration(script: str, word_budget: int) -> str:

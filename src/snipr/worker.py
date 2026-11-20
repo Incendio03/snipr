@@ -215,7 +215,8 @@ def clip_frames(clip: dict, count: int = 4) -> list[Path]:
     return frames
 
 
-def write_narration(clip: dict, vod: dict, streamer: dict, transcript: dict, provider) -> str:
+def write_narration(clip: dict, vod: dict, streamer: dict, transcript: dict, provider,
+                    instructions: str = "") -> str:
     """Ask the LLM for a voiceover script for a clip whose footage is on disk."""
     from . import voice
 
@@ -225,7 +226,8 @@ def write_narration(clip: dict, vod: dict, streamer: dict, transcript: dict, pro
         game = next((c["title"] for c in (vod["chapters"] or []) if c["start"] <= clip["start_s"] < c["end"]), "")
         return provider.write_narration(
             transcribe.text_between(transcript, clip["start_s"], clip["end_s"]), frames, length,
-            voice.word_budget(length), streamer["name"], vod["title"], clip["working_title"], game)
+            voice.word_budget(length), streamer["name"], vod["title"], clip["working_title"], game,
+            instructions=instructions)
     finally:
         shutil.rmtree(frames[0].parent, ignore_errors=True)
 

@@ -147,6 +147,13 @@ CREATE TABLE IF NOT EXISTS events (
     clip_id INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS narration_templates (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS clips_status ON clips(status);
 CREATE INDEX IF NOT EXISTS posts_status ON posts(status, scheduled_at);
 CREATE INDEX IF NOT EXISTS jobs_status ON jobs(status);
