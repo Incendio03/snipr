@@ -230,6 +230,7 @@ class FakeResponse:
 def _gemini(monkeypatch, response):
     """A Gemini provider whose HTTP call is replaced; returns the provider and the captured request."""
     provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    provider.rate_limit_waits_s = (0, 0)             # tests never wait out a real minute
     sent = {}
 
     def fake_post(body):
@@ -287,6 +288,27 @@ def test_gemini_errors_are_explained(monkeypatch):
         provider, _ = _gemini(monkeypatch, response)
         with pytest.raises(llm.LLMError, match=re.escape(expected)):
             provider.select_segments(_request(), None)
+
+
+def test_gemini_waits_out_a_rate_limit_and_sends_long_transcripts_in_parts(monkeypatch):
+    provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    provider.rate_limit_waits_s = (0, 0)                        # no real waiting in the test
+    answers = [FakeResponse(429, {"error": {"message": "quota"}}),
+               _gemini_answer({"segments": []})]
+    calls = []
+    monkeypatch.setattr(provider, "_post", lambda body: (calls.append(body), answers.pop(0))[1])
+    assert provider.select_segments(_request(), None) == []
+    assert len(calls) == 2                                      # tried again after the "slow down"
+
+    # Three refusals in a row is a real failure, reported as a rate limit.
+    stuck = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    stuck.rate_limit_waits_s = (0, 0)
+    monkeypatch.setattr(stuck, "_post", lambda body: FakeResponse(429, {"error": {"message": "quota"}}))
+    with pytest.raises(llm.LLMError, match="rate limit"):
+        stuck.select_segments(_request(), None)
+
+    assert llm.GeminiProvider.max_transcript_tokens < llm.MAX_TRANSCRIPT_TOKENS
+    assert llm.AnthropicProvider(model="m", client=object())._transcript_limit() == llm.MAX_TRANSCRIPT_TOKENS
 
 
 def test_provider_follows_the_setting_and_its_own_key(monkeypatch):

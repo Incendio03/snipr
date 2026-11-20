@@ -270,13 +270,19 @@ class Provider:
     client: object = None
     usage: list[dict] = field(default_factory=list)
 
+    # The most transcript sent in one request. None means the shared default.
+    max_transcript_tokens = None
+
     def _ask(self, purpose: str, system: str, prompt: str | list, schema: dict, max_tokens: int) -> dict:
         raise NotImplementedError
+
+    def _transcript_limit(self) -> int:
+        return self.max_transcript_tokens or MAX_TRANSCRIPT_TOKENS
 
     def select_segments(self, req: "selection.SelectionRequest", nominated: list | None) -> list[dict]:
         """Raw segment dicts for one VOD. Validation happens in ``scoring``."""
         segments = req.transcript.get("segments", [])
-        if nominated is None and _estimated_tokens(segments) > MAX_TRANSCRIPT_TOKENS:
+        if nominated is None and _estimated_tokens(segments) > self._transcript_limit():
             return self._select_in_parts(req)
         answer = self._ask("select", SELECT_SYSTEM, build_select_prompt(req, nominated), SEGMENT_SCHEMA, 32000)
         return answer.get("segments", [])
@@ -286,7 +292,7 @@ class Provider:
         import copy
 
         segments = req.transcript["segments"]
-        parts = max(2, -(-_estimated_tokens(segments) // MAX_TRANSCRIPT_TOKENS))
+        parts = max(2, -(-_estimated_tokens(segments) // self._transcript_limit()))
         size = -(-len(segments) // parts)
         found: list[dict] = []
         for index in range(0, len(segments), size):
@@ -412,7 +418,14 @@ class GeminiProvider(Provider):
     for with ``responseMimeType`` and ``responseJsonSchema``; the key goes in the
     ``x-goog-api-key`` header. On Gemini's free tier Google uses what is sent to
     improve its products; on the paid tier it does not.
+
+    Free-tier allowances are per minute and per day and are not published as
+    fixed numbers, so requests are kept modest (a long transcript goes in
+    several parts) and a "slow down" answer is waited out before giving up.
     """
+
+    max_transcript_tokens = 150_000
+    rate_limit_waits_s = (65, 65)            # pauses after a 429 before the request counts as failed
 
     def _parts(self, prompt: str | list) -> list[dict]:
         if isinstance(prompt, str):
@@ -442,10 +455,16 @@ class GeminiProvider(Provider):
             "generationConfig": {"responseMimeType": "application/json", "responseJsonSchema": schema,
                                  "maxOutputTokens": max_tokens},
         }
-        try:
-            response = self._post(body)
-        except httpx.HTTPError as exc:
-            raise LLMError("Could not reach the Gemini API. Check the internet connection.") from exc
+        import time
+
+        for wait in (*self.rate_limit_waits_s, None):
+            try:
+                response = self._post(body)
+            except httpx.HTTPError as exc:
+                raise LLMError("Could not reach the Gemini API. Check the internet connection.") from exc
+            if response.status_code != 429 or wait is None:
+                break
+            time.sleep(wait)                 # the per-minute allowance refills; try again
         if response.status_code != 200:
             raise LLMError(self._error_text(response))
         data = response.json()
