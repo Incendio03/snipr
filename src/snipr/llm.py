@@ -99,33 +99,41 @@ Write in plain English, in the register of the clip. Do not use emoji."""
 
 NARRATION_SCHEMA = {
     "type": "object",
-    "properties": {"script": {"type": "string"}},
-    "required": ["script"],
+    "properties": {
+        "lines": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {"at": {"type": "number"}, "text": {"type": "string"}},
+                "required": ["at", "text"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["lines"],
     "additionalProperties": False,
 }
 
-NARRATION_SYSTEM = """\
-You write the voiceover for a short vertical clip cut from a livestream. A narrator reads \
-your script over the footage while the stream's own sound plays quietly underneath, and the \
-script is also shown on screen as captions, a couple of words at a time.
+NARRATION_SYSTEM = """You write the voiceover for a short vertical clip cut from a livestream. A narrator reads your lines over the footage. While the narrator talks the stream's own sound is turned down; between your lines it comes back up, so the viewer hears the streamer. Your lines are also shown on screen as captions, a couple of words at a time.
 
-You are given still frames from the clip in the order they appear, the transcript of what \
-the streamer says during it, and a word budget.
+You are given still frames from the clip with the time each was taken, the transcript of what the streamer says with the time of every line (seconds from the start of the clip), the clip's length and a word budget.
 
-Write what a gaming channel's narrator would say over this moment: present tense, concrete, \
-about what is happening on screen and why it is worth watching. The first sentence is the \
-hook, so it must make someone stop scrolling. Follow the order of events in the frames so \
-the words match the picture as it plays.
+Return the narration as timed lines. Each line has "at", the second in the clip at which the narrator starts saying it, and "text", one or two sentences.
 
-Only say what the frames and the transcript support. Do not invent facts about the game, \
-such as features, numbers or release details, and do not claim to know what the streamer \
-is thinking. Refer to the streamer by name where it reads naturally.
+How to place the lines:
+- The first line is the hook. Put it in the first second or two, and make it a reason to keep watching.
+- Time each line to what is happening then. Use the transcript's times to find the moment: set up a reaction just before it happens, comment on it just after.
+- Leave gaps. The streamer's best lines and biggest reactions should be heard, not talked over. Find them in the transcript and keep your lines clear of those seconds.
+- A line takes about one second per two and a half words. Do not start a line before the previous one can finish.
+- End before the clip does.
 
-The script is read aloud at a fixed pace, so the word budget is a hard limit: a script over \
-budget gets cut off before the clip ends. Aim for 85 to 100 percent of the budget.
+What to say:
+- Be specific. Name what is on screen and what the streamer says. If the transcript says tiger, say tiger, not "a wild animal". Vague lines that could describe any clip are a failure.
+- Only say what the frames and the transcript support. Do not invent facts about the game, such as features, numbers or release details, and do not claim to know what the streamer is thinking.
+- Refer to the streamer by name where it reads naturally.
+- Use the word budget: aim for 70 to 100 percent of it across all lines. It is a hard upper limit, because a script over budget gets cut off.
 
-Write plain sentences only: no stage directions, no speaker labels, no emoji, no hashtags, \
-no quotation marks. Write numbers the way they should be spoken."""
+Write plain sentences only: no stage directions, no bracketed notes, no speaker labels, no emoji, no hashtags, no quotation marks. Write numbers the way they should be spoken."""
 
 
 class LLMError(Exception):
@@ -324,14 +332,15 @@ class Provider:
             f"Word budget: {word_budget} words",
             "",
             "Rewrite the narration draft below. Keep what it says and the order it says it in; improve how it "
-            "reads aloud, tighten it, and make it fit the word budget. Do not add events or facts that are not "
-            "in the draft or the clip transcript.",
+            "reads aloud, tighten it, make it fit the word budget, and time its lines against the transcript. "
+            "Do not add events, details or facts that are not in the draft or the clip transcript. If the "
+            "draft has time cues like [12.5], treat them as the reviewer's wishes for when a line is said.",
             style_block(instructions),
             "<draft>", draft.strip(), "</draft>",
             "", "<clip_transcript>", clip_text.strip() or "(no speech)", "</clip_transcript>",
         ])
         answer = self._ask("narration", NARRATION_SYSTEM, prompt, NARRATION_SCHEMA, 8000)
-        return clean_narration(answer.get("script", ""), word_budget)
+        return timed_script(answer.get("lines"), word_budget, clip_seconds)
 
     def write_narration(self, clip_text: str, frames: list, clip_seconds: float, word_budget: int,
                         streamer: str, vod_title: str, working_title: str = "", game: str = "",
@@ -347,7 +356,8 @@ class Provider:
         content: list = []
         for index, frame in enumerate(frames, 1):
             data = base64.standard_b64encode(Path(frame).read_bytes()).decode("ascii")
-            content.append({"type": "text", "text": f"Frame {index} of {len(frames)}:"})
+            taken = clip_seconds * (index - 0.5) / len(frames)        # frames are spread evenly over the clip
+            content.append({"type": "text", "text": f"Frame {index} of {len(frames)}, at about {taken:.0f} s:"})
             content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
         content.append({"type": "text", "text": "\n".join([
             f"Streamer: {streamer or 'unknown'}",
@@ -360,7 +370,7 @@ class Provider:
             "", "<clip_transcript>", clip_text.strip() or "(no speech)", "</clip_transcript>",
         ])})
         answer = self._ask("narration", NARRATION_SYSTEM, content, NARRATION_SCHEMA, 8000)
-        return clean_narration(answer.get("script", ""), word_budget)
+        return timed_script(answer.get("lines"), word_budget, clip_seconds)
 
     def total_tokens(self) -> dict:
         return {"input_tokens": sum(u["input_tokens"] for u in self.usage),
@@ -653,6 +663,34 @@ def style_block(instructions: str) -> str:
     return ("\nThe reviewer has said how they want this narrated. Follow it for tone, voice, pacing and "
             "structure. It does not change the word budget, and it does not permit saying anything the "
             f"frames and transcript do not support.\n<narration_style>\n{wanted}\n</narration_style>")
+
+
+def timed_script(lines, word_budget: int, clip_seconds: float) -> str:
+    """Turn the model's timed lines into the script format: one [seconds] text line each.
+
+    Lines are put in time order, kept inside the clip, stripped of anything in
+    brackets or quotes, and dropped from the end once the word budget is spent.
+    """
+    import re
+
+    kept: list[tuple[float, str]] = []
+    for item in lines if isinstance(lines, list) else []:
+        if not isinstance(item, dict):
+            continue
+        text = " ".join(re.sub(r"\[[^\]]*\]", " ", str(item.get("text") or "")).replace('"', "").split())
+        at = item.get("at")
+        if not text or isinstance(at, bool) or not isinstance(at, (int, float)):
+            continue
+        kept.append((min(max(0.0, float(at)), max(0.0, clip_seconds - 2.0)), text))
+    kept.sort(key=lambda pair: pair[0])
+    out, used, limit = [], 0, int(word_budget * 1.1)
+    for at, text in kept:
+        count = len(text.split())
+        if used and used + count > limit:
+            break
+        out.append(f"[{at:.1f}] {text}")
+        used += count
+    return "\n".join(out)
 
 
 def clean_narration(script: str, word_budget: int) -> str:

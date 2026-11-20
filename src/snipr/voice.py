@@ -117,9 +117,79 @@ def synthesize(text: str, out_wav: Path, voice: str = DEFAULT_VOICE, speed: floa
     return len(pcm) / float(rate)
 
 
+def read_wav(path: Path) -> tuple[np.ndarray, int]:
+    with wave.open(str(path), "rb") as handle:
+        rate = handle.getframerate()
+        raw = handle.readframes(handle.getnframes())
+    return np.frombuffer(raw, dtype=np.int16), rate
+
+
+def write_wav(path: Path, samples: np.ndarray, rate: int) -> None:
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(int(rate))
+        handle.writeframes(np.asarray(samples, dtype=np.int16).tobytes())
+
+
 def word_budget(clip_seconds: float, speed: float = 1.0) -> int:
     """How many words of narration fit a clip, leaving a short breath at each end."""
     return max(8, int((clip_seconds - 1.0) * WORDS_PER_SECOND * speed))
+
+
+# --------------------------------------------------------------------------- script format (pure)
+
+_CUE = re.compile(r"^\s*\[\s*(\d+(?:\.\d+)?)\s*s?\s*\]\s*")
+_PAUSE = re.compile(r"\[\s*pause\s*\]", re.IGNORECASE)
+_TAG = re.compile(r"\[[^\]]*\]")
+PAUSE_S = 0.7          # what a [pause] mark is worth
+LINE_GAP_S = 0.25      # breath between two lines that follow each other
+
+
+def parse_narration(text: str) -> list[dict]:
+    """Split a narration script into the pieces that are spoken one after another.
+
+    A line may start with a time cue, ``[12.5]``, meaning "say this 12.5 seconds
+    into the clip"; lines without one follow straight on. ``[pause]`` leaves a
+    gap. Any other bracketed note is dropped, so nothing in brackets is ever
+    spoken or captioned. Returns ``[{"at": seconds or None, "text": str,
+    "pause_after": seconds}]``.
+    """
+    parts: list[dict] = []
+    for line in str(text or "").splitlines():
+        cue = _CUE.match(line)
+        at = float(cue.group(1)) if cue else None
+        rest = line[cue.end():] if cue else line
+        pieces = _PAUSE.split(rest)
+        for index, piece in enumerate(pieces):
+            spoken = " ".join(_TAG.sub(" ", piece).split())
+            last = index == len(pieces) - 1
+            if spoken:
+                parts.append({"at": at, "text": spoken, "pause_after": 0.0 if last else PAUSE_S})
+                at = None                       # the cue belongs to the first piece of its line
+            elif not last and parts:
+                parts[-1]["pause_after"] += PAUSE_S
+    return parts
+
+
+def spoken_text(text: str) -> str:
+    """The words a narration script actually says, without cues or bracketed notes."""
+    return " ".join(part["text"] for part in parse_narration(text))
+
+
+def schedule(parts: list[dict], lengths: list[float], lead_s: float) -> list[tuple[float, float]]:
+    """When each spoken piece starts and ends on the clip's clock.
+
+    A cued piece starts at its cue unless the one before is still talking, in
+    which case it waits its turn; an uncued piece follows the previous one.
+    """
+    spans: list[tuple[float, float]] = []
+    cursor = lead_s
+    for part, length in zip(parts, lengths):
+        start = max(cursor, part["at"]) if part["at"] is not None else cursor
+        spans.append((round(start, 3), round(start + length, 3)))
+        cursor = start + length + LINE_GAP_S + part["pause_after"]
+    return spans
 
 
 # --------------------------------------------------------------------------- timings (pure)

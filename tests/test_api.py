@@ -184,8 +184,11 @@ def test_voiceover_on_a_clip_needs_a_narration_that_fits(client, seeded):
     long = client.put(f"/api/clips/{clip_id}", json={"layout": on, "narration": "word " * 400})
     assert long.status_code == 422 and "400 words" in long.json()["detail"]
 
-    saved = client.put(f"/api/clips/{clip_id}", json={"layout": on, "narration": "  Speed walks  into\nthe water. "}).json()
-    assert saved["narration"] == "Speed walks into the water." and saved["layout"]["voiceover"] is True
+    saved = client.put(f"/api/clips/{clip_id}", json={"layout": on, "narration": "  [0.5] Speed walks  into\n\n[12] the water. [pause] "}).json()
+    assert saved["narration"] == "[0.5] Speed walks into\n[12] the water. [pause]"     # lines and cues are kept
+    assert saved["layout"]["voiceover"] is True
+    only_notes = client.put(f"/api/clips/{clip_id}", json={"layout": on, "narration": "[3.0] [pause]"})
+    assert only_notes.status_code == 422 and "no narration yet" in only_notes.json()["detail"]   # cues alone say nothing
     assert saved["render_state"] == "rendering"
 
     db.update("clips", clip_id, {"render_state": "ready"})

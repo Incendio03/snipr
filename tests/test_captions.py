@@ -172,19 +172,18 @@ def test_audio_filters_keep_duck_or_mute_the_stream_sound():
     plain = render.audio_filters(10.0, 30.0, None, "duck")
     assert plain.startswith("[0:a]atrim=start=10.000:duration=30.000") and plain.endswith("[a]")
     assert "amix" not in plain and "volume" not in plain
-    duck = render.audio_filters(10.0, 30.0, 3, "duck", narration_len=29.5, gain=1.8)
-    assert "[3:a]" in duck and "adelay=400:all=1" in duck and f",volume={render.DUCKED_VOLUME}[bed]" in duck
-    assert "volume=1.800" in duck                                  # narrator brought up to level
+    duck = render.audio_filters(10.0, 30.0, 3, "duck", gain=1.8)
+    assert "[3:a]" in duck and f",volume={render.DUCKED_VOLUME}[bed]" in duck
+    assert "volume=1.800" in duck and "adelay" not in duck      # narrator levelled; its timing is in the file
     assert "amix=inputs=2:duration=first" in duck and "normalize=0" in duck and "alimiter" in duck
-    mute = render.audio_filters(10.0, 30.0, 3, "mute", narration_len=28.0)
+    mute = render.audio_filters(10.0, 30.0, 3, "mute", [(0.4, 5.0)])
     assert "[0:a]" not in mute and "[3:a]" in mute and "apad=whole_dur=30.000" in mute
 
 
-def test_stream_sound_comes_back_after_a_short_narration():
-    short = render.audio_filters(0.0, 40.0, 3, "duck", narration_len=11.0)
-    assert "if(lt(t,11.600)" in short and ":eval=frame" in short    # lowered until the narrator is done
-    full = render.audio_filters(0.0, 40.0, 3, "duck", narration_len=39.0)
-    assert "if(lt(t" not in full                                    # narration fills the clip: stays lowered
+def test_stream_sound_is_lowered_only_while_the_narrator_talks():
+    timed = render.audio_filters(0.0, 40.0, 3, "duck", [(0.4, 4.0), (12.0, 16.5)])
+    assert "between(t,0.25,4.30)+between(t,11.85,16.80)" in timed and ":eval=frame" in timed
+    assert f"{render.DUCKED_VOLUME},1)" in timed                  # full level in the gaps
 
 
 def test_frame_filters_for_fill_and_stacked():

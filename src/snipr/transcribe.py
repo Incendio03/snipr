@@ -222,5 +222,20 @@ def words_between(transcript: dict, start: float, end: float) -> list[list]:
     return out
 
 
+def timed_lines(transcript: dict, start: float, end: float, words_per_line: int = 8) -> str:
+    """What is said in ``start``..``end``, as lines stamped with seconds from ``start``.
+
+    Lines are short (a few words each) so whoever reads them can tell to the
+    second when something is said. Used to give the narration writer the timing
+    of the clip, not only its words.
+    """
+    words = words_between(transcript, start, end)
+    lines = []
+    for index in range(0, len(words), words_per_line):
+        chunk = words[index:index + words_per_line]
+        lines.append(f"[{max(0.0, chunk[0][0] - start):.1f}] " + " ".join(w[2] for w in chunk))
+    return "\n".join(lines)
+
+
 def text_between(transcript: dict, start: float, end: float) -> str:
     return " ".join(w[2] for w in words_between(transcript, start, end))

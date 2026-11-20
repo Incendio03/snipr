@@ -206,31 +206,62 @@ NARRATION_TARGET_DB = -19.0       # RMS level the narrator is brought to, in dBF
 
 
 def narrate(script: str, clip_seconds: float, out_wav: Path, voice_id: str,
-            settings: dict) -> tuple[list[list], float, float]:
-    """Speak a narration script.
+            settings: dict) -> tuple[list[list], list[tuple[float, float]], float]:
+    """Speak a narration script and lay it on the clip's clock.
 
-    Returns the script's words timed on the clip's clock, the narration's
-    length in seconds, and the gain that brings it to a consistent loudness.
-    If the narration would run past the end of the clip it is spoken again a
-    little faster. The words are timed by transcribing the spoken audio and
-    mapping the result back onto the script (see ``voice.align_script``).
+    The script is spoken piece by piece (see ``voice.parse_narration``): a line
+    with a time cue is placed at that moment, a ``[pause]`` leaves a gap, and
+    the streamer's own sound is heard in the gaps. ``out_wav`` is as long as
+    the narration needs and starts at the clip's first frame.
+
+    Returns the script's words timed on the clip's clock, the stretches where
+    the narrator is speaking, and the gain that brings the voice to a
+    consistent loudness. If the narration would run past the end of the clip
+    it is spoken again a little faster. Words are timed by transcribing the
+    spoken audio and mapping the result back onto the script.
     """
     from . import render, voice
 
-    room = max(2.0, clip_seconds - render.NARRATION_LEAD_S - 0.3)
-    length = voice.synthesize(script, out_wav, voice_id)
-    if length > room:
-        length = voice.synthesize(script, out_wav, voice_id, speed=min(1.3, length / room * 1.02))
+    parts = voice.parse_narration(script)
+    if not parts:
+        raise voice.VoiceError("There is no narration text to speak.")
+    room = max(2.0, clip_seconds - 0.3)
+
+    def speak(speed: float) -> tuple[list[np.ndarray], int, list[tuple[float, float]]]:
+        pieces, lengths, rate = [], [], 24000
+        for index, part in enumerate(parts):
+            piece_path = out_wav.with_name(f"{out_wav.stem}-{index}.wav")
+            lengths.append(voice.synthesize(part["text"], piece_path, voice_id, speed))
+            samples, rate = voice.read_wav(piece_path)
+            pieces.append(samples)
+            piece_path.unlink(missing_ok=True)
+        return pieces, rate, voice.schedule(parts, lengths, render.NARRATION_LEAD_S)
+
+    pieces, rate, spans = speak(1.0)
+    if spans[-1][1] > room:
+        talking = sum(b - a for a, b in spans)
+        pieces, rate, spans = speak(min(1.3, max(1.05, talking / max(1.0, room - (spans[-1][1] - talking)) * 1.02)))
+    if spans[-1][1] > room:
+        # Still too long with its cues: let the lines follow each other without waiting for them.
+        for part in parts:
+            part["at"], part["pause_after"] = None, 0.0
+        spans = voice.schedule(parts, [len(p) / rate for p in pieces], render.NARRATION_LEAD_S)
+
+    track = np.zeros(int(spans[-1][1] * rate) + rate // 10, dtype=np.int16)
+    for samples, (start, _end) in zip(pieces, spans):
+        at = int(start * rate)
+        track[at:at + len(samples)] = samples[: len(track) - at]
+    voice.write_wav(out_wav, track, rate)
+
     levels = audio.energy_curve(out_wav, hop_s=0.1)
-    spoken = levels[levels > -50.0]                       # leave the pauses out of the average
+    spoken = levels[levels > -50.0]                       # leave the gaps out of the average
     rms_db = float(np.mean(spoken)) if spoken.size else NARRATION_TARGET_DB
     gain = float(np.clip(10 ** ((NARRATION_TARGET_DB - rms_db) / 20), 0.5, 4.0))
     cfg = settings["transcription"]
     heard, _ = transcribe.transcribe(out_wav, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)))
     heard_words = [w for seg in heard["segments"] for w in seg["w"]]
-    lead = render.NARRATION_LEAD_S
-    words = [[w[0] + lead, w[1] + lead, w[2]] for w in voice.align_script(script, heard_words, length)]
-    return words, length, gain
+    words = voice.align_script(voice.spoken_text(script), heard_words, spans[-1][1])
+    return words, spans, gain
 
 
 def produce(source: Path, source_start: float, start: float, end: float, transcript: dict,
@@ -252,7 +283,9 @@ def produce(source: Path, source_start: float, start: float, end: float, transcr
     try:
         voice_wav: Path | None = None
         voice_len, voice_gain = None, 1.0
-        if options.get("voiceover") and narration.strip():
+        from . import voice as voice_module
+
+        if options.get("voiceover") and voice_module.spoken_text(narration):
             voice_wav = work_dir / "narration.wav"
             words, voice_len, voice_gain = narrate(narration, end - start, voice_wav, options.get("voice") or "",
                                                    settings or config.load_settings())

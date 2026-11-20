@@ -191,13 +191,15 @@ def test_write_narration_sends_frames_in_order_with_the_word_budget(tmp_path):
         frame = tmp_path / f"frame{index}.jpg"
         frame.write_bytes(b"\xff\xd8jpeg-bytes-%d" % index)
         frames.append(frame)
-    provider, client = _provider([{"script": '"Speed walks straight into the water." The crocodile does not wait.'}])
-    script = provider.write_narration("Oh my god!", frames, 31.0, 78, "IShowSpeed", "GTA 6 day 2", game="GTA 6")
-    assert script == "Speed walks straight into the water. The crocodile does not wait."
+    provider, client = _provider([{"lines": [{"at": 14.0, "text": "The crocodile does not wait. [beat]"},
+                                            {"at": 0.5, "text": '"Speed walks straight into the water."'}]}])
+    script = provider.write_narration("[3.0] Oh my god!", frames, 31.0, 78, "IShowSpeed", "GTA 6 day 2", game="GTA 6")
+    assert script == "[0.5] Speed walks straight into the water.\n[14.0] The crocodile does not wait."   # in time order, tidied
     content = client.calls[0]["messages"][0]["content"]
     kinds = [block["type"] for block in content]
     assert kinds == ["text", "image", "text", "image", "text"]
-    assert content[1]["source"]["media_type"] == "image/jpeg" and content[0]["text"] == "Frame 1 of 2:"
+    assert content[1]["source"]["media_type"] == "image/jpeg" and content[0]["text"] == "Frame 1 of 2, at about 8 s:"
+    assert "[3.0] Oh my god!" in content[-1]["text"]                # the transcript arrives with its timing
     assert "Word budget: 78 words" in content[-1]["text"] and "Clip length: 31 seconds" in content[-1]["text"]
     assert client.calls[0]["output_config"]["format"]["schema"] == llm.NARRATION_SCHEMA
     assert provider.usage[-1]["purpose"] == "narration"
@@ -206,7 +208,7 @@ def test_write_narration_sends_frames_in_order_with_the_word_budget(tmp_path):
 def test_narration_style_reaches_the_prompt_without_loosening_the_rules(tmp_path):
     frame = tmp_path / "f.jpg"
     frame.write_bytes(b"\xff\xd8jpeg")
-    provider, client = _provider([{"script": "Goal."}, {"script": "Goal."}])
+    provider, client = _provider([{"lines": [{"at": 0, "text": "Goal."}]}, {"lines": [{"at": 0, "text": "Goal."}]}])
     provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6",
                              instructions="  Hype sports\ncommentator. ")
     text = client.calls[0]["messages"][0]["content"][-1]["text"]
@@ -219,13 +221,25 @@ def test_narration_style_reaches_the_prompt_without_loosening_the_rules(tmp_path
 
 
 def test_rewrite_keeps_the_draft_and_the_budget_in_front_of_the_model():
-    provider, client = _provider([{"script": "Speed walks straight into the water. " * 30}])
+    provider, client = _provider([{"lines": [{"at": i * 2.0, "text": "Speed walks straight into the water."} for i in range(30)]}])
     out = provider.rewrite_narration("speed walks in the water", "Oh my god!", 20.0, 49, "calm", "IShowSpeed")
     prompt = client.calls[0]["messages"][0]["content"]
     assert "<draft>\nspeed walks in the water\n</draft>" in prompt and "Word budget: 49 words" in prompt
     assert "Keep what it says" in prompt and "<narration_style>\ncalm\n</narration_style>" in prompt
-    assert len(out.split()) <= 54                                           # an over-long answer is trimmed to fit
+    from snipr import voice
+    spoken = voice.spoken_text(out)
+    assert 0 < len(spoken.split()) <= 54                                    # an over-long answer is trimmed to fit
+    assert out.startswith("[0.0] Speed walks") and all(line.startswith("[") for line in out.splitlines())
     assert client.calls[0]["system"][0]["text"] == llm.NARRATION_SYSTEM
+
+
+def test_timed_lines_are_kept_inside_the_clip_and_the_budget():
+    lines = [{"at": 55.0, "text": "Late line."}, {"at": -3, "text": "Early line."}, {"at": "soon", "text": "bad time"},
+             {"at": 5, "text": "   "}, "junk", {"at": 20, "text": "Middle line here."}]
+    assert llm.timed_script(lines, 50, 30.0) == "[0.0] Early line.\n[20.0] Middle line here.\n[28.0] Late line."
+    assert llm.timed_script(lines, 4, 30.0) == "[0.0] Early line."         # stops once the budget is spent
+    assert llm.timed_script(None, 50, 30.0) == "" and llm.timed_script([], 50, 30.0) == ""
+    assert "tiger, say tiger" in llm.NARRATION_SYSTEM and "Leave gaps" in llm.NARRATION_SYSTEM
 
 
 def test_narration_over_budget_is_cut_at_a_sentence_end():
@@ -291,8 +305,8 @@ def test_gemini_request_shape_and_answer(monkeypatch):
 def test_gemini_sends_frames_as_inline_images(monkeypatch, tmp_path):
     frame = tmp_path / "f.jpg"
     frame.write_bytes(b"\xff\xd8jpeg")
-    provider, sent = _gemini(monkeypatch, _gemini_answer({"script": "Speed walks into the water."}))
-    assert provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6") == "Speed walks into the water."
+    provider, sent = _gemini(monkeypatch, _gemini_answer({"lines": [{"at": 1, "text": "Speed walks into the water."}]}))
+    assert provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6") == "[1.0] Speed walks into the water."
     parts = sent["body"]["contents"][0]["parts"]
     assert [list(p)[0] for p in parts] == ["text", "inlineData", "text"]
     assert parts[1]["inlineData"]["mimeType"] == "image/jpeg" and parts[1]["inlineData"]["data"]

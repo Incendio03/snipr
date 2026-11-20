@@ -308,7 +308,7 @@ export function mount(root, ctx) {
     }
 
     // ----- Voiceover -----
-    const narration = h('textarea', { class: 'input', rows: '5' });
+    const narration = h('textarea', { class: 'input', rows: '8' });
     narration.value = clip.narration ?? '';
     const countEl = h('span', { class: 'count', role: 'status' });
     const narrationError = errorLine();
@@ -376,6 +376,7 @@ export function mount(root, ctx) {
     const voiceBody = h('div', { class: 'voice-grid' },
       h('div', { class: 'block' },
         field({ label: 'Narration', control: narration, help: countEl }),
+        h('span', { class: 'help' }, 'One line per thing the narrator says. Start a line with a time in square brackets, like [12.5], to say it 12.5 seconds into the clip. Write [pause] for a gap. The streamer is heard in the gaps. Nothing in brackets is spoken or shown.'),
         narrationError,
         field({ label: 'How to narrate', control: style, help: 'Optional. Your directions for tone and style. Used by Write narration and Rewrite mine.' }),
         h('div', { class: 'row row--tight' }, templateSelect, templateDelete),
@@ -397,7 +398,8 @@ export function mount(root, ctx) {
     }
     function paintVoice() {
       voiceBody.hidden = !m.voice.on;
-      const words = fmt.wordCount(narration.value);
+      // Time cues and bracketed notes are not spoken, so they do not count.
+      const words = fmt.wordCount(narration.value.replace(/\[[^\]]*\]/g, ' '));
       const budget = wordBudget();
       const over = budget != null && words > budget;
       countEl.textContent = budget == null ? fmt.plural(words, 'word')

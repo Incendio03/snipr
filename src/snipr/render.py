@@ -105,28 +105,28 @@ DUCKED_VOLUME = 0.16              # stream sound under a voiceover: about 16 dB 
 
 
 def audio_filters(rest: float, duration: float, narration_input: int | None, mix: str,
-                  narration_len: float | None = None, gain: float = 1.0) -> str:
+                  narration_len: list | None = None, gain: float = 1.0) -> str:
     """The audio half of the filter graph, ending in ``[a]``.
 
     Without a voiceover the stream's own sound is kept. With one, the stream
     sound is dropped ("mute") or lowered while the narrator speaks ("duck").
-    When the narration is shorter than the clip, the lowered stream sound
-    comes back up once the narrator has finished.
+    ``narration_len`` is the list of (start, end) stretches where the narrator
+    talks; between them the stream sound is back at full level.
     """
     stream = (f"[0:a]atrim=start={rest:.3f}:duration={duration:.3f},asetpts=PTS-STARTPTS,"
               f"aresample=async=1:first_pts=0")
     if narration_input is None:
         return f"{stream}[a]"
-    lead_ms = int(NARRATION_LEAD_S * 1000)
-    voice = (f"[{narration_input}:a]aresample=48000,volume={gain:.3f},adelay={lead_ms}:all=1,"
-             f"apad=whole_dur={duration:.3f}")
+    # The narration file already sits on the clip's clock (its lead-in and the gaps
+    # between lines are part of it), so it is laid in from the first frame.
+    voice = f"[{narration_input}:a]aresample=48000,volume={gain:.3f},apad=whole_dur={duration:.3f}"
     if mix == "mute":
         return f"{voice},alimiter=limit=0.95[a]"
-    done = NARRATION_LEAD_S + (narration_len or duration) + 0.2
-    if done < duration - 1.0:
-        low, rise = DUCKED_VOLUME, 0.6
-        level = (f"volume='if(lt(t,{done:.3f}),{low},min(1,{low}+(t-{done:.3f})/{rise}*{1 - low:.2f}))'"
-                 f":eval=frame")
+    spans = narration_len if isinstance(narration_len, list) else None
+    if spans:
+        # Lowered only while the narrator is talking; the streamer is heard in the gaps.
+        talking = "+".join(f"between(t,{max(0.0, a - 0.15):.2f},{b + 0.3:.2f})" for a, b in spans[:40])
+        level = f"volume='if(gt({talking},0),{DUCKED_VOLUME},1)':eval=frame"
     else:
         level = f"volume={DUCKED_VOLUME}"
     return (f"{stream},aresample=48000,{level}[bed];{voice}[vo];"

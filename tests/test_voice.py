@@ -38,3 +38,25 @@ def test_word_budget_scales_with_clip_length_and_speed():
     assert voice.word_budget(31, speed=1.2) > voice.word_budget(31)
     assert voice.word_budget(2) == 8                        # never asks for an unusably short script
     assert voice.DEFAULT_VOICE in voice.voice_ids()
+
+
+def test_script_is_split_into_spoken_pieces_with_cues_and_pauses():
+    parts = voice.parse_narration("[0.5] Speed finds a tiger. [pause] He is not happy.\n\n[14] Watch his face. [zoom in]\nNo cue here.")
+    assert [(p["at"], p["text"], p["pause_after"]) for p in parts] == [
+        (0.5, "Speed finds a tiger.", voice.PAUSE_S), (None, "He is not happy.", 0.0),
+        (14.0, "Watch his face.", 0.0), (None, "No cue here.", 0.0)]
+    assert voice.spoken_text("[3s] Hello [pause] there [note to self]") == "Hello there"
+    assert voice.parse_narration("") == [] and voice.parse_narration("[pause] [2.0]") == []
+    # A plain paragraph with no cues is one piece, as before.
+    assert voice.parse_narration("Just one line of narration.") == [{"at": None, "text": "Just one line of narration.", "pause_after": 0.0}]
+
+
+def test_pieces_are_placed_at_their_cues_without_overlapping():
+    parts = voice.parse_narration("[0] Hook line. [pause] Second.\n[10] Timed line.\n[11] Too soon after.")
+    spans = voice.schedule(parts, [2.0, 1.0, 3.0, 2.0], lead_s=0.4)
+    assert spans[0] == (0.4, 2.4)                          # nothing starts before the lead-in
+    after_pause = round(2.4 + voice.LINE_GAP_S + voice.PAUSE_S, 3)
+    assert spans[1] == (after_pause, round(after_pause + 1.0, 3))
+    assert spans[2] == (10.0, 13.0)                        # waits for its cue
+    assert spans[3][0] == 13.0 + voice.LINE_GAP_S          # its cue had passed, so it follows on
+    assert all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))

@@ -469,7 +469,9 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
         if key in body:
             if not isinstance(body[key], str):
                 raise bad(f"{key.capitalize()} must be text.")
-            values[key] = " ".join(body[key].split()) if key == "narration" else body[key].strip()
+            # A narration keeps its lines: each may carry a time cue such as [12.5].
+            values[key] = ("\n".join(" ".join(line.split()) for line in body[key].splitlines() if line.strip())
+                           if key == "narration" else body[key].strip())
     if "hashtags" in body:
         if not isinstance(body["hashtags"], list):
             raise bad("Hashtags must be a list.")
@@ -523,12 +525,13 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
     final_layout = values.get("layout", current_layout)
     narration = values.get("narration", clip["narration"])
     if final_layout["voiceover"]:
-        if not narration:
+        said = voice.spoken_text(narration)          # what is actually spoken: no cues, no bracketed notes
+        if not said:
             raise bad("Voiceover is on but there is no narration yet. Write one, or switch voiceover off.")
         length = values.get("end_s", clip["end_s"]) - values.get("start_s", clip["start_s"])
         budget = int(voice.word_budget(length) * 1.3)       # the narrator can speed up by about a third
-        if len(narration.split()) > budget:
-            raise bad(f"The narration is {len(narration.split())} words. About {budget} is the most that "
+        if len(said.split()) > budget:
+            raise bad(f"The narration is {len(said.split())} words. About {budget} is the most that "
                       f"fits a {length:.0f} second clip. Shorten it or lengthen the clip.")
     rerender = (values.get("start_s", clip["start_s"]) != clip["start_s"]
                 or values.get("end_s", clip["end_s"]) != clip["end_s"]
@@ -569,7 +572,7 @@ def write_clip_narration(clip_id: int, body: dict = Body(default={})) -> dict:
     except llm.LLMError as exc:
         raise bad(str(exc), 502) from exc
     _count_tokens(provider, vod["id"])
-    return {"narration": script, "words": len(script.split()),
+    return {"narration": script, "words": len(voice.spoken_text(script).split()),
             "word_budget": voice.word_budget(clip["end_s"] - clip["start_s"])}
 
 
@@ -593,8 +596,8 @@ def _count_tokens(provider, vod_id: int) -> None:
 def rewrite_clip_narration(clip_id: int, body: dict = Body(...)) -> dict:
     """Have the LLM rework a narration the reviewer typed. Returned, not saved."""
     instructions = _instructions(body)
-    draft = " ".join(str(body.get("text") or "").split())
-    if not draft:
+    draft = "\n".join(" ".join(line.split()) for line in str(body.get("text") or "").splitlines() if line.strip())
+    if not voice.spoken_text(draft):
         raise bad("Type a narration first; there is nothing to rewrite.")
     clip = _need("clips", clip_id, "clip")
     vod = db.get("vods", clip["vod_id"])
@@ -608,14 +611,14 @@ def rewrite_clip_narration(clip_id: int, body: dict = Body(...)) -> dict:
     folder = pipeline.vod_dir(VodInfo(vod["platform"], vod["vod_key"], vod["source_url"], vod["title"], vod["duration"]))
     spoken = ""
     if (folder / "transcript.json").exists():
-        spoken = transcribe.text_between(transcribe.load(folder / "transcript.json"), start, end)
+        spoken = transcribe.timed_lines(transcribe.load(folder / "transcript.json"), start, end)
     budget = voice.word_budget(length)
     try:
         script = provider.rewrite_narration(draft, spoken, length, budget, instructions, streamer["name"])
     except llm.LLMError as exc:
         raise bad(str(exc), 502) from exc
     _count_tokens(provider, vod["id"])
-    return {"narration": script, "words": len(script.split()), "word_budget": budget}
+    return {"narration": script, "words": len(voice.spoken_text(script).split()), "word_budget": budget}
 
 
 # --------------------------------------------------------------------------- narration templates

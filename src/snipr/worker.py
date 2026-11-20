@@ -225,7 +225,7 @@ def write_narration(clip: dict, vod: dict, streamer: dict, transcript: dict, pro
         length = clip["end_s"] - clip["start_s"]
         game = next((c["title"] for c in (vod["chapters"] or []) if c["start"] <= clip["start_s"] < c["end"]), "")
         return provider.write_narration(
-            transcribe.text_between(transcript, clip["start_s"], clip["end_s"]), frames, length,
+            transcribe.timed_lines(transcript, clip["start_s"], clip["end_s"]), frames, length,
             voice.word_budget(length), streamer["name"], vod["title"], clip["working_title"], game,
             instructions=instructions)
     finally:
