@@ -383,13 +383,17 @@ def clean_narration(script: str, word_budget: int) -> str:
 
 
 def fallback_metadata(clip_text: str, vod_title: str, game: str = "") -> dict:
-    """Post text when no LLM is configured: plain, clearly a placeholder to edit."""
+    """Post text when no LLM is configured: plain, clearly a placeholder to edit.
+
+    The headline is left empty. It is burned into the video, and the first
+    words of the transcript ("But I know me yeah, I") make a worse hook than
+    no plate at all; the reviewer can type one in the edit screen.
+    """
     words = clip_text.split()
-    headline = " ".join(words[:6]).rstrip(".,!?") if words else (vod_title or "Clip")
     tags = ["".join(ch for ch in game.lower() if ch.isalnum())] if game else []
     return clean_metadata({
-        "headline": headline,
-        "title": (vod_title or headline)[:70],
+        "headline": "",
+        "title": (vod_title or "Clip")[:70],
         "description": " ".join(words[:30]),
         "hashtags": [t for t in tags if t] + ["gaming", "clips"],
     })

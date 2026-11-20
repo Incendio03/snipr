@@ -182,8 +182,9 @@ def test_narration_over_budget_is_cut_at_a_sentence_end():
 def test_headline_is_capped_and_fallback_metadata_is_usable():
     assert len(llm.clean_metadata({"headline": "one two three four five six seven eight nine ten"})["headline"].split()) == 8
     meta = llm.fallback_metadata("Oh my god five stars they are all on me", "GTA 6 day 2", "GTA 6")
-    assert meta["headline"] == "Oh my god five stars they"
+    assert meta["headline"] == ""                     # no plate is better than a nonsense hook
     assert meta["hashtags"][0] == "gta6" and meta["title"] == "GTA 6 day 2"
+    assert meta["description"].startswith("Oh my god")
 
 
 def test_no_key_means_no_provider(monkeypatch):

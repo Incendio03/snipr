@@ -104,27 +104,39 @@ NARRATION_LEAD_S = 0.4            # the narrator starts this long after the clip
 DUCKED_VOLUME = 0.16              # stream sound under a voiceover: about 16 dB down
 
 
-def audio_filters(rest: float, duration: float, narration_input: int | None, mix: str) -> str:
+def audio_filters(rest: float, duration: float, narration_input: int | None, mix: str,
+                  narration_len: float | None = None, gain: float = 1.0) -> str:
     """The audio half of the filter graph, ending in ``[a]``.
 
     Without a voiceover the stream's own sound is kept. With one, the stream
-    sound is lowered under the narrator ("duck") or dropped ("mute").
+    sound is dropped ("mute") or lowered while the narrator speaks ("duck").
+    When the narration is shorter than the clip, the lowered stream sound
+    comes back up once the narrator has finished.
     """
     stream = (f"[0:a]atrim=start={rest:.3f}:duration={duration:.3f},asetpts=PTS-STARTPTS,"
               f"aresample=async=1:first_pts=0")
     if narration_input is None:
         return f"{stream}[a]"
     lead_ms = int(NARRATION_LEAD_S * 1000)
-    voice = f"[{narration_input}:a]aresample=48000,adelay={lead_ms}:all=1,apad=whole_dur={duration:.3f}"
+    voice = (f"[{narration_input}:a]aresample=48000,volume={gain:.3f},adelay={lead_ms}:all=1,"
+             f"apad=whole_dur={duration:.3f}")
     if mix == "mute":
-        return f"{voice}[a]"
-    return (f"{stream},aresample=48000,volume={DUCKED_VOLUME}[bed];{voice}[vo];"
-            f"[bed][vo]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
+        return f"{voice},alimiter=limit=0.95[a]"
+    done = NARRATION_LEAD_S + (narration_len or duration) + 0.2
+    if done < duration - 1.0:
+        low, rise = DUCKED_VOLUME, 0.6
+        level = (f"volume='if(lt(t,{done:.3f}),{low},min(1,{low}+(t-{done:.3f})/{rise}*{1 - low:.2f}))'"
+                 f":eval=frame")
+    else:
+        level = f"volume={DUCKED_VOLUME}"
+    return (f"{stream},aresample=48000,{level}[bed];{voice}[vo];"
+            f"[bed][vo]amix=inputs=2:duration=first:dropout_transition=0:normalize=0,alimiter=limit=0.95[a]")
 
 
 def render_clip(source: Path, source_start: float, start: float, end: float, out: Path,
                 layout: dict | None, overlays=None, src_info: dict | None = None,
-                narration: Path | None = None, mix: str = "duck") -> Path:
+                narration: Path | None = None, mix: str = "duck",
+                narration_len: float | None = None, narration_gain: float = 1.0) -> Path:
     """Render ``start``..``end`` (VOD time) as a 1080 x 1920 clip with headline and captions.
 
     ``overlays`` is a ``captions.Overlays``; None renders the picture alone.
@@ -162,7 +174,7 @@ def render_clip(source: Path, source_start: float, start: float, end: float, out
     if narration is not None:
         args += ["-i", str(narration)]
         narration_input = index
-    graph.append(audio_filters(rest, duration, narration_input, mix))
+    graph.append(audio_filters(rest, duration, narration_input, mix, narration_len, narration_gain))
     args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]",
              "-t", f"{duration:.3f}", *video_codec_args(), "-c:a", "aac", "-b:a", "160k",
              "-movflags", "+faststart", str(out)]

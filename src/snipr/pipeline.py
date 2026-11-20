@@ -138,9 +138,15 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, transcript, stats)
 
 
-def narrate(script: str, clip_seconds: float, out_wav: Path, voice_id: str, settings: dict) -> list[list]:
-    """Speak a narration script and return its words timed on the clip's clock.
+NARRATION_TARGET_DB = -19.0       # RMS level the narrator is brought to, in dBFS
 
+
+def narrate(script: str, clip_seconds: float, out_wav: Path, voice_id: str,
+            settings: dict) -> tuple[list[list], float, float]:
+    """Speak a narration script.
+
+    Returns the script's words timed on the clip's clock, the narration's
+    length in seconds, and the gain that brings it to a consistent loudness.
     If the narration would run past the end of the clip it is spoken again a
     little faster. The words are timed by transcribing the spoken audio and
     mapping the result back onto the script (see ``voice.align_script``).
@@ -151,11 +157,16 @@ def narrate(script: str, clip_seconds: float, out_wav: Path, voice_id: str, sett
     length = voice.synthesize(script, out_wav, voice_id)
     if length > room:
         length = voice.synthesize(script, out_wav, voice_id, speed=min(1.3, length / room * 1.02))
+    levels = audio.energy_curve(out_wav, hop_s=0.1)
+    spoken = levels[levels > -50.0]                       # leave the pauses out of the average
+    rms_db = float(np.mean(spoken)) if spoken.size else NARRATION_TARGET_DB
+    gain = float(np.clip(10 ** ((NARRATION_TARGET_DB - rms_db) / 20), 0.5, 4.0))
     cfg = settings["transcription"]
     heard, _ = transcribe.transcribe(out_wav, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)))
     heard_words = [w for seg in heard["segments"] for w in seg["w"]]
     lead = render.NARRATION_LEAD_S
-    return [[w[0] + lead, w[1] + lead, w[2]] for w in voice.align_script(script, heard_words, length)]
+    words = [[w[0] + lead, w[1] + lead, w[2]] for w in voice.align_script(script, heard_words, length)]
+    return words, length, gain
 
 
 def produce(source: Path, source_start: float, start: float, end: float, transcript: dict,
@@ -176,17 +187,19 @@ def produce(source: Path, source_start: float, start: float, end: float, transcr
     work_dir = Path(tempfile.mkdtemp(prefix="snipr-overlay-"))
     try:
         voice_wav: Path | None = None
+        voice_len, voice_gain = None, 1.0
         if options.get("voiceover") and narration.strip():
             voice_wav = work_dir / "narration.wav"
-            words = narrate(narration, end - start, voice_wav, options.get("voice") or "",
-                            settings or config.load_settings())
+            words, voice_len, voice_gain = narrate(narration, end - start, voice_wav, options.get("voice") or "",
+                                                   settings or config.load_settings())
         else:
             words = [[w[0] - start, w[1] - start, w[2]] for w in transcribe.words_between(transcript, start, end)]
         overlays = captions.build_overlays(
             words, headline if options.get("show_headline", True) else "", end - start, work_dir / "overlay",
             stacked=render.is_stacked(layout), style=captions.get_style(options.get("caption_style")))
         return render.render_clip(source, source_start, start, end, out_path, layout, overlays,
-                                  narration=voice_wav, mix=options.get("mix") or "duck")
+                                  narration=voice_wav, mix=options.get("mix") or "duck",
+                                  narration_len=voice_len, narration_gain=voice_gain)
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
 
