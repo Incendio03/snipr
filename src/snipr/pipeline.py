@@ -54,11 +54,34 @@ def merge_ranges(ranges: list[tuple[float, float]], gap: float = 0.0) -> list[tu
     return merged
 
 
-def _covers(have: list | None, want: list[tuple[float, float]]) -> bool:
-    """Do the transcribed ranges ``have`` include every range in ``want``?"""
-    if not have:
-        return False
-    return all(any(a - 1 <= lo and hi <= b + 1 for a, b in have) for lo, hi in want)
+CHECKPOINT_S = 1800.0      # transcription is saved after every this many seconds of audio
+
+
+def subtract_ranges(want: list[tuple[float, float]], have: list[tuple[float, float]],
+                    ignore_s: float = 2.0) -> list[tuple[float, float]]:
+    """The parts of ``want`` that ``have`` does not cover. Slivers under ``ignore_s`` are dropped."""
+    missing: list[tuple[float, float]] = []
+    for lo, hi in want:
+        at = lo
+        for a, b in sorted(have):
+            if b <= at or a >= hi:
+                continue
+            if a > at:
+                missing.append((at, min(a, hi)))
+            at = max(at, b)
+            if at >= hi:
+                break
+        if at < hi:
+            missing.append((at, hi))
+    return [(a, b) for a, b in missing if b - a > ignore_s]
+
+
+def _steps(lo: float, hi: float, size: float) -> list[float]:
+    out, at = [], lo
+    while at < hi - 0.5:
+        out.append(at)
+        at += size
+    return out
 
 
 def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
@@ -146,21 +169,34 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
         if speech_ranges is not None else ranges
     if not transcribe_speech:
         return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, {"segments": []}, {})
-    if _covers(state.get("transcript_ranges"), wanted) and transcript_path.exists():
-        transcript = transcribe.load(transcript_path)
-        stats = state.get("stats", {})
-    else:
+    # Transcribed speech is never thrown away. Whatever is already on disk is
+    # kept, only the missing stretches are transcribed, and the result is saved
+    # after every half hour of audio, so a restart or a later run with other
+    # ranges costs at most that much work again.
+    have = [tuple(r) for r in state.get("transcript_ranges") or []] if transcript_path.exists() else []
+    transcript = transcribe.load(transcript_path) if have else {"segments": []}
+    stats = state.get("stats", {})
+    missing = subtract_ranges(wanted, have)
+    if missing:
         progress("transcribe", 0.0)
         cfg = settings["transcription"]
-        whole = len(wanted) == 1 and wanted[0][0] <= 1.0 and wanted[0][1] >= vod.duration - 1.0
-        transcript, tstats = transcribe.transcribe(
-            audio_path, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)),
-            ranges=None if whole else wanted, progress=lambda f: progress("transcribe", f))
-        transcribe.save(transcript, transcript_path)
-        stats = {"audio_seconds": round(tstats.audio_seconds, 1), "wall_seconds": round(tstats.wall_seconds, 1),
-                 "speed": round(tstats.speed, 2), "device": tstats.device, "model": tstats.model,
-                 "compute_type": tstats.compute_type}
-        remember(transcript_ranges=[[round(a), round(b)] for a, b in wanted], stats=stats)
+        pieces = [(at, min(hi, at + CHECKPOINT_S)) for lo, hi in missing
+                  for at in _steps(lo, hi, CHECKPOINT_S)]
+        total = sum(hi - lo for lo, hi in pieces)
+        done = wall = 0.0
+        for lo, hi in pieces:
+            part, tstats = transcribe.transcribe(
+                audio_path, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)), ranges=[(lo, hi)],
+                progress=lambda f, lo=lo, hi=hi: progress("transcribe", (done + f * (hi - lo)) / total))
+            transcript = {"segments": sorted(transcript["segments"] + part["segments"], key=lambda s: s["s"])}
+            have = merge_ranges(have + [(lo, hi)])
+            done += hi - lo
+            wall += tstats.wall_seconds
+            stats = {"audio_seconds": round(done, 1), "wall_seconds": round(wall, 1),
+                     "speed": round(done / wall, 2) if wall else 0.0, "device": tstats.device,
+                     "model": tstats.model, "compute_type": tstats.compute_type}
+            transcribe.save(transcript, transcript_path)
+            remember(transcript_ranges=[[round(a, 1), round(b, 1)] for a, b in have], stats=stats)
     progress("transcribe", 1.0)
 
     return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, transcript, stats)

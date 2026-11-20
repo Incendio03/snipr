@@ -41,79 +41,112 @@ export function mount(root, ctx) {
   function build(initial) {
     let saved = initial;
 
-    // ----- API key -----
-    const keyStatus = h('div', { role: 'status' });
-    const keyInput = h('input', { type: 'password', class: 'input input--mono', placeholder: 'sk-ant-…', autocomplete: 'off', spellcheck: 'false' });
-    const keyError = errorLine();
-    const keySave = h('button', { type: 'button', class: 'btn' }, 'Save key');
-    const keyRemoveSlot = h('div', { class: 'confirm' });
-    let keySet = Boolean(saved.llm && saved.llm.key_set);
+    // ----- API keys: one block per provider -----
+    // Not a <form>: each block sits inside the settings form, and its key is
+    // saved on its own, by its button or by Enter in the field.
+    function keyBlockFor({ provider, label, placeholder, initiallySet }) {
+      const keyStatus = h('div', { role: 'status' });
+      const keyInput = h('input', { type: 'password', class: 'input input--mono', placeholder, autocomplete: 'off', spellcheck: 'false' });
+      const keyError = errorLine();
+      const keySave = h('button', { type: 'button', class: 'btn' }, 'Save key');
+      const keyRemoveSlot = h('div', { class: 'confirm' });
+      let keySet = Boolean(initiallySet);
 
-    function paintKey(confirming = false) {
-      replace(keyStatus, keySet
-        ? h('span', { class: 'chip chip--ok' }, 'A key is saved')
-        : h('span', { class: 'chip chip--warn' }, 'No key saved'));
-      keyInput.placeholder = keySet ? 'Paste a new key to replace the saved one' : 'sk-ant-…';
-      keySave.textContent = keySet ? 'Replace key' : 'Save key';
-      if (!keySet) { replace(keyRemoveSlot); return; }
-      if (!confirming) {
-        replace(keyRemoveSlot, h('button', { type: 'button', class: 'btn btn--danger', onclick: () => paintKey(true) }, 'Remove key'));
-        return;
+      function paint(confirming = false) {
+        replace(keyStatus, keySet
+          ? h('span', { class: 'chip chip--ok' }, 'A key is saved')
+          : h('span', { class: 'chip chip--warn' }, 'No key saved'));
+        keyInput.placeholder = keySet ? 'Paste a new key to replace the saved one' : placeholder;
+        keySave.textContent = keySet ? 'Replace key' : 'Save key';
+        if (!keySet) { replace(keyRemoveSlot); return; }
+        if (!confirming) {
+          replace(keyRemoveSlot, h('button', { type: 'button', class: 'btn btn--danger', onclick: () => paint(true) }, 'Remove key'));
+          return;
+        }
+        const yes = h('button', { type: 'button', class: 'btn btn--danger' }, 'Remove the key');
+        const no = h('button', { type: 'button', class: 'btn', onclick: () => { paint(false); keyRemoveSlot.querySelector('button').focus(); } }, 'Keep');
+        yes.addEventListener('click', async () => {
+          keyError.set('');
+          try {
+            const result = await withBusy([yes, no], () => api.settings.removeKey(provider));
+            if (!alive) return;
+            keySet = Boolean(result && result.key_set);
+            toast('Key removed.', { kind: 'ok' });
+            ctx.refreshState();
+          } catch (err) {
+            if (alive) keyError.set(err.message);
+          }
+          if (alive) paint(false);
+        });
+        replace(keyRemoveSlot, h('span', { class: 'confirm__text', role: 'alert' }, 'Informative and Custom modes stop working without a key for the provider in use.'), yes, no);
+        no.focus();
       }
-      const yes = h('button', { type: 'button', class: 'btn btn--danger' }, 'Remove the key');
-      const no = h('button', { type: 'button', class: 'btn', onclick: () => { paintKey(false); keyRemoveSlot.querySelector('button').focus(); } }, 'Keep');
-      yes.addEventListener('click', async () => {
+
+      async function saveKey() {
         keyError.set('');
+        const key = keyInput.value.trim();
+        if (!key) { keyError.set('Paste the key first.'); keyInput.focus(); return; }
         try {
-          const result = await withBusy([yes, no], () => api.settings.removeKey());
+          const result = await withBusy(keySave, () => api.settings.setKey(key, provider));
           if (!alive) return;
-          keySet = Boolean(result && result.key_set);
-          toast('Key removed.', { kind: 'ok' });
+          keySet = Boolean(result ? result.key_set : true);
+          keyInput.value = '';
+          toast('Key saved.', { kind: 'ok' });
           ctx.refreshState();
+          paint(false);
         } catch (err) {
           if (alive) keyError.set(err.message);
         }
-        if (alive) paintKey(false);
-      });
-      replace(keyRemoveSlot, h('span', { class: 'confirm__text', role: 'alert' }, 'Informative and Custom modes stop working without a key.'), yes, no);
-      no.focus();
-    }
-
-    // Not a <form>: it sits inside the settings form, and the key is saved on
-    // its own, by its button or by Enter in the field.
-    const keyBlock = h('div', { class: 'block', style: { gap: '12px' } },
-      keyStatus,
-      h('div', { class: 'key-row' },
-        field({ label: 'Anthropic API key', control: keyInput }),
-        keySave),
-      keyError,
-      keyRemoveSlot);
-    async function saveKey() {
-      keyError.set('');
-      const key = keyInput.value.trim();
-      if (!key) { keyError.set('Paste the key first.'); keyInput.focus(); return; }
-      try {
-        const result = await withBusy(keySave, () => api.settings.setKey(key));
-        if (!alive) return;
-        keySet = Boolean(result ? result.key_set : true);
-        keyInput.value = '';
-        toast('Key saved.', { kind: 'ok' });
-        ctx.refreshState();
-        paintKey(false);
-      } catch (err) {
-        if (alive) keyError.set(err.message);
       }
+      keySave.addEventListener('click', saveKey);
+      keyInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); saveKey(); }
+      });
+
+      const el = h('div', { class: 'block', style: { gap: '12px' } },
+        keyStatus,
+        h('div', { class: 'key-row' }, field({ label, control: keyInput }), keySave),
+        keyError,
+        keyRemoveSlot);
+      return { el, paint };
     }
-    keySave.addEventListener('click', saveKey);
-    keyInput.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') { e.preventDefault(); saveKey(); }
-    });
+    const claudeKey = keyBlockFor({ provider: 'anthropic', label: 'Anthropic API key', placeholder: 'sk-ant-…', initiallySet: saved.llm && saved.llm.key_set });
+    const geminiKey = keyBlockFor({ provider: 'gemini', label: 'Gemini API key', placeholder: 'AIza…', initiallySet: saved.llm && saved.llm.gemini_key_set });
 
     // ----- Controls for PUT /api/settings -----
     const text = (value, cls = '') => h('input', { type: 'text', class: `input ${cls}`, value: value ?? '', autocomplete: 'off', spellcheck: 'false' });
     const number = (value, attrs = {}) => h('input', { type: 'number', class: 'input input--mono input--w120', value: value ?? '', ...attrs });
 
     const model = text(saved.llm && saved.llm.model, 'input--mono');
+    const geminiModel = text(saved.llm && saved.llm.gemini_model, 'input--mono');
+    const provider = h('select', { class: 'input', id: 'set-provider' },
+      h('option', { value: 'anthropic' }, 'Claude (Anthropic)'),
+      h('option', { value: 'gemini' }, 'Gemini (Google)'));
+    provider.value = (saved.llm && saved.llm.provider) || 'anthropic';
+    const claudePane = h('div', { class: 'block', style: { gap: '16px' } });
+    const geminiPane = h('div', { class: 'block', style: { gap: '16px' } });
+    function paintProvider() {
+      claudePane.hidden = provider.value !== 'anthropic';
+      geminiPane.hidden = provider.value !== 'gemini';
+    }
+    provider.addEventListener('change', paintProvider);
+
+    // "Test connection" asks the provider that is saved, so unsaved changes are saved first by the user.
+    const testBtn = h('button', { type: 'button', class: 'btn' }, 'Test connection');
+    const testResult = h('div', { role: 'status' });
+    testBtn.addEventListener('click', async () => {
+      replace(testResult);
+      if (Object.keys(read(false).patch).length) {
+        replace(testResult, notice('warn', 'Save your settings first. The test uses the provider and model that are saved.'));
+        return;
+      }
+      try {
+        const result = await withBusy(testBtn, () => api.settings.testAi());
+        if (alive) replace(testResult, notice('ok', (result && result.message) || 'It works.'));
+      } catch (err) {
+        if (alive) replace(testResult, notice('danger', err.message));
+      }
+    });
     const windowStart = text(saved.processing && saved.processing.window_start, 'input--mono input--w120');
     const windowEnd = text(saved.processing && saved.processing.window_end, 'input--mono input--w120');
     for (const el of [windowStart, windowEnd]) { el.placeholder = 'HH:MM'; el.maxLength = 5; }
@@ -162,9 +195,13 @@ export function mount(root, ctx) {
       if (show) for (const line of Object.values(errors)) line.set('');
       const s = saved;
 
+      put('llm', 'provider', provider.value, (s.llm && s.llm.provider) || 'anthropic');
       const modelName = model.value.trim();
+      const geminiName = geminiModel.value.trim();
       if (!modelName) fail(errors.model, 'Write the model name, for example claude-haiku-5-5.', model);
       else put('llm', 'model', modelName, s.llm && s.llm.model);
+      if (!geminiName) fail(errors.model, 'Write the Gemini model name, for example gemini-3.8-flash.', geminiModel);
+      else put('llm', 'gemini_model', geminiName, s.llm && s.llm.gemini_model);
 
       const start = fmt.normaliseHHMM(windowStart.value);
       const end = fmt.normaliseHHMM(windowEnd.value);
@@ -216,9 +253,12 @@ export function mount(root, ctx) {
     }
 
     const form = h('form', { novalidate: true, class: 'settings' },
-      section('Language model', 'Informative and Custom modes need an Anthropic API key. The key is kept in Windows Credential Manager and is never shown again.',
-        keyBlock,
-        field({ label: 'Model', control: model, help: 'The Claude model Snipr asks to pick moments and write the post text.', error: errors.model })),
+      section('AI provider', 'The AI reads transcripts to pick moments and writes headlines, post text and narration. Without a key, Highlights still works on chat and loudness alone. Keys are kept in Windows Credential Manager and are never shown again.',
+        field({ label: 'Use', control: provider, help: 'You can save a key for both and switch between them here.' }),
+        claudePane,
+        geminiPane,
+        errors.model,
+        h('div', { class: 'block', style: { gap: '10px' } }, h('div', null, testBtn), testResult)),
       section('Processing', 'Downloading, transcription and encoding only run inside this window, unless you press Run now in Activity.',
         h('div', { class: 'block' },
           h('div', { class: 'row' },
@@ -272,8 +312,18 @@ export function mount(root, ctx) {
       }
     });
 
+    claudePane.append(
+      claudeKey.el,
+      field({ label: 'Claude model', control: model, help: 'Paid per use from Anthropic Console credit. A 3 hour stream costs around a cent or two on the small model.' }));
+    geminiPane.append(
+      geminiKey.el,
+      field({ label: 'Gemini model', control: geminiModel, help: 'gemini-3.8-flash, gemini-3.6-flash and gemini-3.5-flash-lite have a free tier. Get a key in Google AI Studio (aistudio.google.com), under "Get API key".' }),
+      notice('warn', (saved.llm && saved.llm.gemini_note) || 'On the free tier, Google uses what is sent to improve its products.'));
+
     replace(body, form);
-    paintKey(false);
+    claudeKey.paint(false);
+    geminiKey.paint(false);
+    paintProvider();
     paintStorage();
     sync();
   }

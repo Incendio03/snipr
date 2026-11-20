@@ -86,7 +86,7 @@ export function busyBar(label) {
 /** One line shown on Review and Streamers while no API key is saved. */
 export function llmNotice(state) {
   if (!state || state.llm_ready !== false) return null;
-  return notice('', 'Informative and Custom modes need an Anthropic API key. Highlights still finds moments from chat and audio. ',
+  return notice('', 'Informative and Custom modes need an AI key (Claude or Gemini). Highlights still finds moments from chat and audio. ',
     h('a', { href: '#/settings' }, 'Add a key in Settings'), '.');
 }
 

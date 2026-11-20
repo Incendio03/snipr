@@ -115,7 +115,8 @@ export const api = {
   settings: {
     get: () => get('/api/settings'),
     update: (body) => put('/api/settings', body),
-    setKey: (key) => post('/api/settings/api-key', { key }),
-    removeKey: () => del('/api/settings/api-key'),
+    setKey: (key, provider = 'anthropic') => post('/api/settings/api-key', { key, provider }),
+    removeKey: (provider = 'anthropic') => del(`/api/settings/api-key?provider=${encodeURIComponent(provider)}`),
+    testAi: () => post('/api/settings/test-ai'),
   },
 };

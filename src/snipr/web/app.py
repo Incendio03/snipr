@@ -224,7 +224,9 @@ def get_state() -> dict:
             "review_count": db.scalar("SELECT COUNT(*) FROM clips WHERE status IN ('candidate', 'pending_review')"),
             "due_posts": db.scalar("SELECT COUNT(*) FROM posts WHERE status = 'due'"),
             "failed_jobs": db.scalar("SELECT COUNT(*) FROM jobs WHERE status = 'failed'"),
-            "llm_ready": llm.api_key() is not None, "model": settings["llm"]["model"],
+            "llm_ready": llm.api_key(settings) is not None,
+            "provider": llm.provider_name(settings),
+            "model": llm.model_for(settings, llm.provider_name(settings)),
             "window": _window(settings), "worker": _worker_state()}
 
 
@@ -546,7 +548,7 @@ def write_clip_narration(clip_id: int) -> dict:
     streamer = db.get("streamers", vod["streamer_id"])
     provider = llm.get_provider(config.load_settings())
     if provider is None:
-        raise bad("Writing a narration needs an Anthropic API key. Add one in Settings, or type the "
+        raise bad("Writing a narration needs a Claude or Gemini API key. Add one in Settings, or type the "
                   "narration yourself.", 409)
     folder = pipeline.vod_dir(VodInfo(vod["platform"], vod["vod_key"], vod["source_url"], vod["title"], vod["duration"]))
     if not clip["source_path"] or not Path(clip["source_path"]).exists() or not (folder / "transcript.json").exists():
@@ -831,7 +833,12 @@ def settings_out() -> dict:
     s = config.load_settings()
     root = config.data_dir()
     used = sum(f.stat().st_size for f in root.rglob("*") if f.is_file())
-    return {"llm": {"model": s["llm"]["model"], "key_set": llm.api_key() is not None},
+    return {"llm": {"provider": llm.provider_name(s),
+                    "model": llm.model_for(s, "anthropic"), "key_set": llm.key_for("anthropic") is not None,
+                    "gemini_model": llm.model_for(s, "gemini"), "gemini_key_set": llm.key_for("gemini") is not None,
+                    "gemini_note": "On Gemini's free tier, Google uses what Snipr sends (stream transcripts and, "
+                                   "for voiceover, still frames) to improve its products. On the paid tier it "
+                                   "does not."},
             "processing": {k: s["processing"][k] for k in ("window_start", "window_end", "poll_minutes", "max_retries")},
             "selection": {"min_score": s["selection"]["min_score"]},
             "publishing": {"default_post_slots": s["publishing"]["default_post_slots"],
@@ -858,10 +865,16 @@ def get_settings() -> dict:
 def put_settings(body: dict = Body(...)) -> dict:
     changes: dict = {}
     try:
-        if model := (body.get("llm") or {}).get("model"):
-            if not re.fullmatch(r"[A-Za-z0-9._\-]{3,80}", str(model)):
-                raise bad("That does not look like a model name.")
-            changes.setdefault("llm", {})["model"] = str(model)
+        chosen = body.get("llm") or {}
+        if "provider" in chosen:
+            if chosen["provider"] not in llm.PROVIDERS:
+                raise bad("The AI provider must be Claude or Gemini.")
+            changes.setdefault("llm", {})["provider"] = chosen["provider"]
+        for key in ("model", "gemini_model"):
+            if model := chosen.get(key):
+                if not re.fullmatch(r"[A-Za-z0-9._\-]{3,80}", str(model)):
+                    raise bad("That does not look like a model name.")
+                changes.setdefault("llm", {})[key] = str(model)
         processing = body.get("processing") or {}
         for key in ("window_start", "window_end"):
             if key in processing:
@@ -895,19 +908,41 @@ def put_settings(body: dict = Body(...)) -> dict:
     return settings_out()
 
 
+def _provider_arg(value) -> str:
+    name = str(value or "anthropic")
+    if name not in llm.PROVIDERS:
+        raise bad("The AI provider must be Claude or Gemini.")
+    return name
+
+
 @app.post("/api/settings/api-key")
 def set_api_key(body: dict = Body(...)) -> dict:
+    """Store a provider's API key in Windows Credential Manager. ``provider`` defaults to Claude."""
+    name = _provider_arg(body.get("provider"))
     key = str(body.get("key") or "").strip()
     if len(key) < 20 or " " in key:
         raise bad("That does not look like an API key.")
-    secrets.put("anthropic_api_key", key)
-    return {"key_set": True}
+    secrets.put(llm.PROVIDERS[name]["secret"], key)
+    return {"key_set": True, "provider": name}
 
 
 @app.delete("/api/settings/api-key")
-def delete_api_key() -> dict:
-    secrets.delete("anthropic_api_key")
-    return {"key_set": llm.api_key() is not None}
+def delete_api_key(provider: str = "anthropic") -> dict:
+    name = _provider_arg(provider)
+    secrets.delete(llm.PROVIDERS[name]["secret"])
+    return {"key_set": llm.key_for(name) is not None, "provider": name}
+
+
+@app.post("/api/settings/test-ai")
+def test_ai() -> dict:
+    """Send one tiny request to the selected provider, to confirm the key and model work."""
+    settings = config.load_settings()
+    try:
+        result = llm.check_provider(settings)
+    except llm.LLMError as exc:
+        raise bad(str(exc), 502) from exc
+    label = llm.PROVIDERS[result["provider"]]["label"]
+    return {**result, "message": f"{label} answered using {result['model']}. Snipr can use it."}
 
 
 # --------------------------------------------------------------------------- files

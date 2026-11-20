@@ -136,7 +136,7 @@ def select(req: SelectionRequest, llm=None) -> list[Segment]:
     if req.mode in ("informative", "custom"):
         if llm is None:
             raise NeedsLLM(f"{req.mode.title()} mode reads the transcript with the LLM. "
-                           "Add an Anthropic API key in settings to use it.")
+                           "Add a Claude or Gemini API key in Settings to use it.")
         if req.mode == "custom" and not req.instructions.strip():
             raise ValueError("Custom mode needs instructions describing what to look for.")
         raw = llm.select_segments(req, None)

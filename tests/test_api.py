@@ -388,7 +388,7 @@ def test_a_permanent_failure_is_not_retried(data_dir, seeded, monkeypatch):
 
 def test_settings_round_trip_and_validation(client):
     settings = client.get("/api/settings").json()
-    assert settings["llm"] == {"model": "claude-haiku-5-5", "key_set": False}
+    assert settings["llm"]["model"] == "claude-haiku-5-5" and settings["llm"]["key_set"] is False
     assert settings["processing"]["window_start"] == "01:00" and settings["storage"]["free_gb"] > 0
     saved = client.put("/api/settings", json={"processing": {"window_start": "2:30", "poll_minutes": 30},
                                               "selection": {"min_score": 0.7},
@@ -401,6 +401,52 @@ def test_settings_round_trip_and_validation(client):
     assert client.put("/api/settings", json={"processing": {"window_end": "late"}}).status_code == 422
     assert client.put("/api/settings", json={"transcription": {"model": "huge"}}).status_code == 422
     assert client.post("/api/settings/api-key", json={"key": "short"}).status_code == 422
+
+
+def test_gemini_can_be_chosen_and_keys_are_kept_per_provider(client, monkeypatch):
+    from snipr import llm
+
+    stored = {}
+    monkeypatch.setattr(llm.secrets, "get", lambda name: stored.get(name))
+    monkeypatch.setattr("snipr.web.app.secrets.put", lambda name, value: stored.__setitem__(name, value))
+    monkeypatch.setattr("snipr.web.app.secrets.delete", lambda name: stored.pop(name, None))
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+
+    start = client.get("/api/settings").json()["llm"]
+    assert start["provider"] == "anthropic" and start["gemini_model"] == "gemini-3.8-flash"
+    assert start["key_set"] is False and start["gemini_key_set"] is False and "free tier" in start["gemini_note"]
+
+    saved = client.post("/api/settings/api-key", json={"key": "AIza-test-key-123456789", "provider": "gemini"}).json()
+    assert saved == {"key_set": True, "provider": "gemini"} and "gemini_api_key" in stored
+    assert client.get("/api/state").json()["llm_ready"] is False        # Claude is still the one in use
+
+    switched = client.put("/api/settings", json={"llm": {"provider": "gemini", "gemini_model": "gemini-3.5-flash-lite"}}).json()
+    assert switched["llm"]["provider"] == "gemini" and switched["llm"]["gemini_key_set"] is True
+    state = client.get("/api/state").json()
+    assert state["llm_ready"] is True and state["provider"] == "gemini" and state["model"] == "gemini-3.5-flash-lite"
+
+    assert client.put("/api/settings", json={"llm": {"provider": "copilot"}}).status_code == 422
+    assert client.post("/api/settings/api-key", json={"key": "x" * 30, "provider": "copilot"}).status_code == 422
+    removed = client.delete("/api/settings/api-key", params={"provider": "gemini"}).json()
+    assert removed == {"key_set": False, "provider": "gemini"} and client.get("/api/state").json()["llm_ready"] is False
+
+
+def test_test_connection_reports_success_and_the_providers_own_error(client, monkeypatch):
+    from snipr import llm
+
+    no_key = client.post("/api/settings/test-ai")
+    assert no_key.status_code == 502 and "No API key" in no_key.json()["detail"]
+
+    monkeypatch.setattr(llm, "check_provider", lambda settings: {"ok": True, "provider": "gemini", "model": "gemini-3.8-flash"})
+    ok = client.post("/api/settings/test-ai").json()
+    assert ok["ok"] is True and "Gemini (Google) answered using gemini-3.8-flash" in ok["message"]
+
+    def rejected(settings):
+        raise llm.LLMError("The Gemini API key was rejected. Check it in settings.")
+
+    monkeypatch.setattr(llm, "check_provider", rejected)
+    bad_key = client.post("/api/settings/test-ai")
+    assert bad_key.status_code == 502 and "rejected" in bad_key.json()["detail"]
 
 
 def test_index_and_missing_media(client):

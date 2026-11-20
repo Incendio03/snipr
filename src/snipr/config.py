@@ -20,8 +20,9 @@ DEFAULTS: dict[str, Any] = {
         "batch_size": 8,
     },
     "llm": {
-        "provider": "anthropic",
+        "provider": "anthropic",            # or "gemini"
         "model": "claude-haiku-5-5",
+        "gemini_model": "gemini-3.8-flash",
     },
     "selection": {
         "min_score": 0.6,

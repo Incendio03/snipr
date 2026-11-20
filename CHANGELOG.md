@@ -2,6 +2,18 @@
 
 Each milestone in `docs/design.md` gets a version bump and a git tag: milestone N is `v0.N.0`.
 
+## Unreleased
+
+- **Gemini as a second AI provider.** Settings has a provider choice (Claude or Gemini), a key for each, a model name for each, and a "Test connection" button. Gemini has a free tier; on it Google uses what is sent to improve its products. Not yet run against the live Gemini API, because no key is stored; request and error handling are tested with a stand-in.
+- **Picking clips by hand.** `snipr nominate` writes a stream's candidate moments with their transcript; `snipr import-picks` puts chosen clips in the review queue. Used for the first set of clips from a 24 hour stream.
+- **Review decisions feed back.** A streamer's latest approvals and rejections, with reasons, are shown to the AI when the next stream is selected.
+- **Cancel** on the Activity page for jobs that are not running.
+- **Lost connections are waited out.** A job that fails while the PC is offline retries every two minutes without using up its attempts.
+- **Transcription keeps its progress.** It is saved after every half hour of audio and never redone; only missing stretches are transcribed. Highlights transcribes only around its spikes.
+- Informative and Custom stop at once, with an explanation, when no AI key is saved, instead of transcribing first.
+- The sample frame follows the streamer's game filter. Changing a streamer's channel link counts as a fresh start.
+- `Start Snipr.cmd`: double-click to start.
+
 ## v0.7.0 — milestone 7: voiceover
 
 - A clip can be narrated: a voice reads a script over the footage and the captions follow the narrator.

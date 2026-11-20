@@ -262,7 +262,17 @@ Export comes first so that publishing never depends on a platform approving an A
 
 ## 10. LLM provider
 
-**Default: Claude (Anthropic API).** The provider sits behind a small interface with two functions, `select_segments` and `write_metadata`, so it can be swapped for Gemini or OpenAI later without touching the rest of the code.
+**Two providers, chosen in Settings: Claude (Anthropic) or Gemini (Google).** Each has its own key, kept in Windows Credential Manager, and its own model name. A "Test connection" button sends one tiny request to confirm the key and model work. The providers share the prompts and the answer checking; only the request itself differs, so another provider can be added without touching the rest of the code.
+
+| | Claude | Gemini |
+|---|---|---|
+| Default model | `claude-haiku-5-5` | `gemini-3.8-flash` |
+| Cost | Paid per use from prepaid credit; cents per stream | Has a free tier with daily limits |
+| What is sent used for training | No | On the free tier, yes (per Google's pricing page on 2026-11-20). Not on the paid tier |
+
+**No key at all** still works for Highlights, on chat and loudness alone. Informative and Custom refuse to start without a key and say so. Clips can also be picked by hand: `snipr nominate` writes a stream's candidate moments with their transcript, a person or an assistant chooses, and `snipr import-picks` puts the choices in the review queue.
+
+The rest of this section describes the Claude setup.
 
 - **Setup:** create an Anthropic Console account, add prepaid credit, and generate an API key. Snipr stores it in Windows Credential Manager.
 - **Model:** start with `claude-haiku-5-5`. Move to a Sonnet-class model if selection quality is not good enough.

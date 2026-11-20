@@ -295,6 +295,11 @@ def process_vod(job: dict, settings: dict) -> None:
         return
     if _free_gb() < MIN_FREE_GB:
         raise RuntimeError(f"Less than {MIN_FREE_GB:.0f} GB is free on the data drive. Free up space to continue.")
+    if streamer["mode"] in ("informative", "custom") and llm.get_provider(settings) is None:
+        # Say so now, not after forty minutes of transcribing a stream nothing can read.
+        raise Permanent(f"{streamer['mode'].title()} mode needs an AI to read the transcript, and no key is saved. "
+                        "Add a Claude or Gemini key in Settings, or switch this streamer to Highlights, then "
+                        "press Retry.")
 
     analysis = analyze_for(streamer, vod, info, ranges, settings, progress)
     transcribe.release_models()                   # free the GPU before encoding

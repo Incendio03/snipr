@@ -1,4 +1,5 @@
 import json
+import re
 from types import SimpleNamespace
 
 import numpy as np
@@ -215,6 +216,92 @@ def test_headline_is_capped_and_fallback_metadata_is_usable():
     assert meta["headline"] == ""                     # no plate is better than a nonsense hook
     assert meta["hashtags"][0] == "gta6" and meta["title"] == "GTA 6 day 2"
     assert meta["description"].startswith("Oh my god")
+
+
+class FakeResponse:
+    def __init__(self, status_code=200, body=None):
+        self.status_code = status_code
+        self._body = body or {}
+
+    def json(self):
+        return self._body
+
+
+def _gemini(monkeypatch, response):
+    """A Gemini provider whose HTTP call is replaced; returns the provider and the captured request."""
+    provider = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
+    sent = {}
+
+    def fake_post(body):
+        sent["body"] = body
+        return response
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    return provider, sent
+
+
+def _gemini_answer(payload, finish="STOP"):
+    return FakeResponse(200, {
+        "candidates": [{"content": {"parts": [{"text": "thinking...", "thought": True},
+                                               {"text": json.dumps(payload)}]}, "finishReason": finish}],
+        "usageMetadata": {"promptTokenCount": 900, "candidatesTokenCount": 120, "thoughtsTokenCount": 30}})
+
+
+def test_gemini_request_shape_and_answer(monkeypatch):
+    answer = {"segments": [{"start": 100.0, "end": 131.0, "score": 0.8, "title": "OBS scenes",
+                            "reason": "Complete how-to.", "flags": []}]}
+    provider, sent = _gemini(monkeypatch, _gemini_answer(answer))
+    assert provider.select_segments(_request(), None) == answer["segments"]
+    body = sent["body"]
+    assert body["systemInstruction"]["parts"][0]["text"] == llm.SELECT_SYSTEM
+    assert body["contents"][0]["role"] == "user" and "[400.0] Oh my god, five stars!" in body["contents"][0]["parts"][0]["text"]
+    assert body["generationConfig"]["responseMimeType"] == "application/json"
+    assert body["generationConfig"]["responseJsonSchema"] == llm.SEGMENT_SCHEMA
+    assert provider.total_tokens() == {"input_tokens": 900, "output_tokens": 150, "requests": 1}
+
+
+def test_gemini_sends_frames_as_inline_images(monkeypatch, tmp_path):
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"\xff\xd8jpeg")
+    provider, sent = _gemini(monkeypatch, _gemini_answer({"script": "Speed walks into the water."}))
+    assert provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6") == "Speed walks into the water."
+    parts = sent["body"]["contents"][0]["parts"]
+    assert [list(p)[0] for p in parts] == ["text", "inlineData", "text"]
+    assert parts[1]["inlineData"]["mimeType"] == "image/jpeg" and parts[1]["inlineData"]["data"]
+
+
+def test_gemini_errors_are_explained(monkeypatch):
+    cases = [
+        (FakeResponse(400, {"error": {"message": "API key not valid. Please pass a valid API key."}}), "key was rejected"),
+        (FakeResponse(403, {"error": {"message": "denied"}}), "key was rejected"),
+        (FakeResponse(404, {"error": {"message": "model not found"}}), "was not found"),
+        (FakeResponse(429, {"error": {"message": "quota"}}), "rate limit"),
+        (FakeResponse(400, {"error": {"message": "Unknown name foo"}}), "rejected the request: Unknown name foo"),
+        (FakeResponse(503, {}), "returned an error (503)"),
+        (FakeResponse(200, {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}}), "declined this request"),
+        (FakeResponse(200, {"candidates": []}), "no answer"),
+        (_gemini_answer({"segments": []}, finish="MAX_TOKENS"), "cut off"),
+        (_gemini_answer({"segments": []}, finish="SAFETY"), "without a usable answer (safety)"),
+    ]
+    for response, expected in cases:
+        provider, _ = _gemini(monkeypatch, response)
+        with pytest.raises(llm.LLMError, match=re.escape(expected)):
+            provider.select_segments(_request(), None)
+
+
+def test_provider_follows_the_setting_and_its_own_key(monkeypatch):
+    keys = {"gemini_api_key": "AIza-test-key-123456789"}
+    monkeypatch.setattr(llm.secrets, "get", lambda name: keys.get(name))
+    for var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "GEMINI_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    gemini = {"llm": {"provider": "gemini", "gemini_model": "gemini-3.5-flash-lite"}}
+    provider = llm.get_provider(gemini)
+    assert isinstance(provider, llm.GeminiProvider) and provider.model == "gemini-3.5-flash-lite"
+    assert llm.api_key(gemini) == "AIza-test-key-123456789"
+    # Claude is selected but only a Gemini key exists: nothing is available, and the keys do not mix.
+    claude = {"llm": {"provider": "anthropic", "model": "claude-haiku-5-5"}}
+    assert llm.get_provider(claude) is None and llm.api_key(claude) is None
+    assert llm.model_for({"llm": {}}, "gemini") == "gemini-3.8-flash"
 
 
 def test_no_key_means_no_provider(monkeypatch):
