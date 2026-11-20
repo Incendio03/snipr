@@ -342,4 +342,9 @@ def test_settings_round_trip_and_validation(client):
 def test_index_and_missing_media(client):
     assert client.get("/media/clips/424242.mp4").status_code == 404
     assert client.get("/media/frames/..%2F..%2Fsnipr.jpg").status_code == 404
-    assert client.get("/static/fonts/Inter-800.ttf").status_code == 200
+    font = client.get("/static/fonts/Inter-800.ttf")
+    assert font.status_code == 200 and font.headers["content-type"].startswith("font/ttf")
+    page = client.get("/")
+    assert page.status_code == 200 and "text/html" in page.headers["content-type"]
+    script = client.get("/static/js/main.js")
+    assert script.status_code == 200 and "javascript" in script.headers["content-type"]

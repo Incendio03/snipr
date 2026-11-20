@@ -223,8 +223,9 @@ def process_vod(job: dict, settings: dict) -> None:
 
     progress("Reading stream details", None)
     info = platforms.vod_info(vod["source_url"])
-    if info.live_status == "is_live":
-        raise RuntimeError("The stream is still live. It will be processed once it has finished.")
+    if info.live_status in platforms.NOT_READY:
+        raise RuntimeError("The stream is still live or still being processed by the platform. "
+                           "It will be tried again shortly.")
     published = datetime.fromtimestamp(info.published_at).replace(microsecond=0).isoformat() if info.published_at else None
     db.update("vods", vod["id"], {"title": info.title, "duration": info.duration, "chapters": info.chapters,
                                   "published_at": published or vod["published_at"]})

@@ -184,11 +184,19 @@ def render_clip(source: Path, source_start: float, start: float, end: float, out
 
 def grab_frame(source: Path, at: float, out: Path, width: int | None = None) -> Path:
     """Save one frame of a local video as an image."""
+    from .platforms import JPEG_FILTER
+
     out.parent.mkdir(parents=True, exist_ok=True)
     args = ["-ss", f"{max(0.0, at):.3f}", "-i", str(source), "-frames:v", "1"]
-    if width:
-        args += ["-vf", f"scale={width}:-2"]
+    filters = [f"scale={width}:-2"] if width else []
+    if out.suffix.lower() in (".jpg", ".jpeg"):
+        filters.append(JPEG_FILTER)
+        args += ["-q:v", "3"]
+    if filters:
+        args += ["-vf", ",".join(filters)]
     run_ffmpeg([*args, "-update", "1", str(out)])
+    if not out.exists():
+        raise RenderError(f"No frame could be read from {source.name} at {at:.1f} s.")
     return out
 
 

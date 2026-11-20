@@ -23,6 +23,11 @@ import yt_dlp
 from yt_dlp.utils import download_range_func
 
 SUPPORTED = ("twitch", "youtube")
+
+# Writing a JPEG from video: the encoder refuses "TV range" colour (which YouTube
+# marks its video as) unless it is converted to full range first.
+JPEG_FILTER = "scale=out_range=pc,format=yuvj420p"
+JPEG_ARGS = ["-vf", JPEG_FILTER, "-q:v", "3"]
 ProgressFn = Callable[[float], None]
 
 
@@ -230,32 +235,85 @@ def download_video(url: str, out_path: Path, start: float, end: float, height: i
     ``start``. ``audio.find_offset`` measures the real offset against the
     analysis audio.
     """
-    fmt = f"bv*[height<={height}]+ba/b[height<={height}]/b"
+    # H.264 with AAC first: it sits natively in MP4 and decodes fastest. YouTube
+    # otherwise hands out VP9, which works but is slower to render from.
+    fmt = (f"bv*[height<={height}][vcodec^=avc1]+ba[acodec^=mp4a]/"
+           f"bv*[height<={height}]+ba/b[height<={height}]/b")
     return _download(url, out_path, fmt, (max(0.0, start), end), progress, "mp4")
 
 
-def sample_frame(channel: Channel, out_path: Path) -> dict:
-    """Save one frame from the channel's latest finished stream, for marking crops.
+NOT_READY = ("is_live", "is_upcoming", "post_live")     # still live, or the platform is still processing it
 
-    Only a two second section is downloaded. Returns the frame's size and the
-    stream's title. Raises ``PlatformError`` when the channel has no finished stream.
+
+def sample_frame(channel: Channel, out_path: Path, games: list[str] | None = None) -> dict:
+    """Save one frame from a recent finished stream of the channel, for marking crops.
+
+    With ``games`` set, the newest stream that matches the game filter is used
+    and the frame is taken from inside the matching part, so the frame shows
+    the game the streamer will actually be clipped in. When none of the recent
+    streams matches, the latest stream is used and ``matched`` is False.
+
+    Only a ten second section is downloaded. Returns the frame's size, the
+    stream's title, ``matched`` (None when no filter was given) and how many
+    streams were looked at. Raises ``PlatformError`` when the channel has no
+    finished stream.
     """
-    vods = [v for v in list_vods(channel, limit=4) if v.duration == 0 or v.duration > 120]
+    from .scoring import game_matches, game_ranges
+
+    vods = [v for v in list_vods(channel, limit=8 if games else 4) if v.duration == 0 or v.duration > 120]
     if not vods:
         raise PlatformError("This channel has no finished stream to take a frame from yet. "
                             "You can still add the streamer; clips will use a centre crop.")
-    vod = vods[0]
-    info = vod_info(vod.url)
-    # A third of the way in, capped at 20 minutes: past the "starting soon" screen.
-    at = min(max(60.0, info.duration / 3), 1200.0) if info.duration else 300.0
-    section = download_video(vod.url, out_path.with_name(out_path.stem + "_section"), at, at + 2.0)
-    try:
-        subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(section), "-frames:v", "1",
-                        "-q:v", "3", "-update", "1", str(out_path)], check=True, capture_output=True)
-        size = probe_video(section)
-    finally:
-        section.unlink(missing_ok=True)
-    return {"width": size["width"], "height": size["height"], "vod_title": info.title}
+    details: dict[str, VodInfo] = {}
+
+    def look(vod: VodInfo) -> VodInfo:
+        if vod.vod_id not in details:
+            details[vod.vod_id] = vod_info(vod.url)
+        return details[vod.vod_id]
+
+    # Streams to try, best first: (stream, time to take the frame at, does it match the filter).
+    plan: list[tuple[VodInfo, float, bool | None]] = []
+    if games:
+        for vod in vods:
+            # YouTube has no game markers, so the title decides and the listing already has it.
+            if channel.platform == "youtube" and not any(game_matches(g, vod.title) for g in games):
+                continue
+            info = look(vod)
+            ranges = game_ranges(games, info.chapters, info.title, info.duration)
+            if ranges and info.live_status not in NOT_READY:
+                lo, hi = ranges[0]
+                plan.append((info, lo + min(max(60.0, (hi - lo) / 3), 1200.0), True))
+                if len(plan) == 2:
+                    break
+    for vod in vods[:3]:
+        if all(vod.vod_id != chosen.vod_id for chosen, _, _ in plan):
+            info = look(vod)
+            if info.live_status not in NOT_READY:
+                # A third of the way in, capped at 20 minutes: past the "starting soon" screen.
+                at = min(max(60.0, info.duration / 3), 1200.0) if info.duration else 300.0
+                plan.append((info, at, False if games else None))
+
+    info, matched, size = None, None, None
+    for candidate, at, hit in plan:
+        # Ten seconds, not two: a piece is cut between keyframes, and a short piece of a YouTube
+        # stream (keyframes up to five seconds apart) can hold no frame that decodes on its own.
+        try:
+            section = download_video(candidate.url, out_path.with_name(out_path.stem + "_section"), at, at + 10.0)
+        except PlatformError:
+            continue
+        try:
+            subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(section), "-frames:v", "1",
+                            *JPEG_ARGS, "-update", "1", str(out_path)], check=False, capture_output=True)
+            if out_path.exists():
+                info, matched, size = candidate, hit, probe_video(section)
+                break
+        finally:
+            section.unlink(missing_ok=True)
+    if info is None or size is None:
+        raise PlatformError("A frame could not be read from this channel's recent streams. Try again in a "
+                            "moment. You can still save; clips use a centre crop until an area is marked.")
+    return {"width": size["width"], "height": size["height"], "vod_title": info.title,
+            "matched": matched, "looked_at": len(vods)}
 
 
 def probe_duration(path: Path) -> float:

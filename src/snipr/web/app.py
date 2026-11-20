@@ -7,6 +7,7 @@ this API.
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import re
 import secrets as token_source
@@ -21,9 +22,12 @@ from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import (__version__, config, db, llm, pipeline, platforms, publish, scheduler, secrets, selection,
+from .. import (__version__, config, db, llm, pipeline, platforms, publish, scheduler, scoring, secrets, selection,
                 transcribe, voice, worker)
 from ..platforms import PlatformError, VodInfo
+
+mimetypes.add_type("font/ttf", ".ttf")      # Windows has no entry, so fonts went out as octet-stream
+mimetypes.add_type("text/javascript", ".js")  # and a registry override can break ES modules
 
 STATIC_DIR = Path(__file__).parent / "static"
 FONT_DIR = Path(__file__).parent.parent / "assets" / "fonts"
@@ -318,15 +322,24 @@ def sample_frame(body: dict = Body(...)) -> dict:
     if channel.platform not in platforms.SUPPORTED:
         raise bad(f"{channel.platform.title()} is not supported yet.", 400)
     token = token_source.token_hex(8)
+    games_text = str(body.get("games") or "").strip()
+    games = scoring.parse_games(games_text)
     try:
-        info = platforms.sample_frame(channel, config.subdir("frames") / f"{token}.jpg")
+        info = platforms.sample_frame(channel, config.subdir("frames") / f"{token}.jpg", games or None)
     except PlatformError as exc:
         raise bad(str(exc), 502) from exc
     except subprocess.CalledProcessError as exc:
         raise bad("A frame could not be read from the latest stream. Try again in a moment.", 502) from exc
     (config.subdir("frames") / f"{token}.json").write_text(f'{{"w": {info["width"]}, "h": {info["height"]}}}')
+    note = None
+    if info["matched"] is False:
+        note = (f"None of this channel's last {info['looked_at']} streams is in {games_text}, so this frame is "
+                f"from \"{info['vod_title']}\". It still works for marking where the facecam sits. Streams in "
+                f"other games are skipped when processing, so if {games_text} is streamed on another platform, "
+                "use that channel's link.")
     return {"frame_token": token, "url": f"/media/frames/{token}.jpg", "width": info["width"],
-            "height": info["height"], "vod_title": info["vod_title"]}
+            "height": info["height"], "vod_title": info["vod_title"],
+            "game_matched": info["matched"], "note": note}
 
 
 def _apply_frame(values: dict, token) -> None:

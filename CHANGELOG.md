@@ -2,6 +2,38 @@
 
 Each milestone in `docs/design.md` gets a version bump and a git tag: milestone N is `v0.N.0`.
 
+## v0.7.0 — milestone 7: voiceover
+
+- A clip can be narrated: a voice reads a script over the footage and the captions follow the narrator.
+- The voice is Kokoro, an open-source model that runs on this PC. No account, no cost per clip. Seven voices to choose from; a 30-word narration is spoken in about 5 seconds.
+- The script is drafted by Claude from the clip's transcript and four still frames, or typed by hand in the edit screen (typing needs no API key).
+- The stream's own sound is lowered under the narrator, or muted. When the narration is shorter than the clip the stream sound comes back afterwards.
+- Checked on a real clip through the app: the script is heard in full and the captions match it. **Automatic script writing has not been run live** (no API key stored).
+
+## v0.6.0 — milestone 6: scheduler, processing window, retries
+
+- New streams are found automatically every 15 minutes, with a catch-up check on start. A new streamer starts with only their latest stream, not a backlog.
+- Heavy work waits for the processing window (01:00 to 08:00 by default); "Run now" overrides it.
+- A failed job retries up to 3 times with a growing delay, then stops and shows its error with a Retry button.
+- Footage and audio are cleaned up once a stream's clips are all reviewed. Transcripts are kept.
+
+## v0.5.0 — milestone 5: destinations and export
+
+- Destinations with their own posting slots; an approved clip takes the destination's next free slot, one clip per slot.
+- At the slot, a Windows notification says the clip is due and the Publishing page gives the file and the text to copy. "Post now", "Mark as posted" with an optional link, and Cancel.
+- Automatic upload through the platforms' APIs is not built (milestone 9).
+
+## v0.4.0 — milestone 4: database, web app, review queue
+
+- The web page at `http://127.0.0.1:8765`: Review, Edit clip, Streamers, Add streamer with crop marking, Publishing, Activity and Settings, built from the Designer's mock.
+- Add a streamer by pasting a channel link. Approve, edit or reject each clip, with one-click rejection reasons, keyboard shortcuts and undo.
+- Editing a clip's start, end, headline or layout re-renders it; moving a cut beyond the saved footage downloads more.
+- Game filter per streamer. Caption style per streamer and per clip: Box (the Designer's spec) or Bold (heavy capitals, spoken word in yellow), and a switch to hide the headline.
+- The sample frame for marking crops comes from a recent stream that matches the streamer's games, and skips a stream the platform is still processing. Fixed frames not being readable from YouTube streams.
+- Checked in a real browser: a scripted run in Edge clicks through review, edit, approve, undo, post now, mark as posted, reject and the other screens against the real server. 16 checks, no console errors.
+- Checked end to end on a real stream: 45 minutes of one game out of a 3 hour stream went from link to three clips in the review queue in about 9 minutes.
+- Without an API key, Highlights picks on chat and loudness alone with its own quality bar, and leaves the headline empty.
+
 ## v0.3.0 — milestone 3: vertical reframing, headline and captions
 
 - Clips render at 1080 x 1920: Fill frame (one 9:16 crop, centre by default) or Stacked (facecam 1080 x 608 above gameplay 1080 x 1312).
