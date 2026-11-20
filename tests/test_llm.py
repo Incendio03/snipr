@@ -191,8 +191,9 @@ def test_write_narration_sends_frames_in_order_with_the_word_budget(tmp_path):
         frame = tmp_path / f"frame{index}.jpg"
         frame.write_bytes(b"\xff\xd8jpeg-bytes-%d" % index)
         frames.append(frame)
-    provider, client = _provider([{"lines": [{"at": 14.0, "text": "The crocodile does not wait. [beat]"},
-                                            {"at": 0.5, "text": '"Speed walks straight into the water."'}]}])
+    thin = {"lines": [{"at": 14.0, "text": "The crocodile does not wait. [beat]"},
+                      {"at": 0.5, "text": '"Speed walks straight into the water."'}]}
+    provider, client = _provider([thin, thin])
     script = provider.write_narration("[3.0] Oh my god!", frames, 31.0, 78, "IShowSpeed", "GTA 6 day 2", game="GTA 6")
     assert script == "[0.5] Speed walks straight into the water.\n[14.0] The crocodile does not wait."   # in time order, tidied
     content = client.calls[0]["messages"][0]["content"]
@@ -203,19 +204,33 @@ def test_write_narration_sends_frames_in_order_with_the_word_budget(tmp_path):
     assert "Word budget: 78 words" in content[-1]["text"] and "Clip length: 31 seconds" in content[-1]["text"]
     assert client.calls[0]["output_config"]["format"]["schema"] == llm.NARRATION_SCHEMA
     assert provider.usage[-1]["purpose"] == "narration"
+    assert "Write 3 to 5 lines, about 35 words in total" in content[-1]["text"]      # a concrete size to hit
+    # Two short lines is too thin for a 31 second clip: it is asked once more, told why, then accepted.
+    assert len(client.calls) == 2
+    assert "too thin: 2 lines, 11 words" in client.calls[1]["messages"][0]["content"][-1]["text"]
+
+
+def test_a_full_enough_narration_is_not_asked_for_twice(tmp_path):
+    frame = tmp_path / "f.jpg"
+    frame.write_bytes(b"\xff\xd8jpeg")
+    full = {"lines": [{"at": i * 7.0, "text": "Speed walks straight into the deep water here."} for i in range(4)]}
+    provider, client = _provider([full])
+    script = provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6")
+    assert len(script.splitlines()) == 4 and len(client.calls) == 1
+    assert llm.narration_size(49.0, 124)[:2] == (4, 37) and llm.narration_size(8.0, 20)[:2] == (2, 8)
 
 
 def test_narration_style_reaches_the_prompt_without_loosening_the_rules(tmp_path):
     frame = tmp_path / "f.jpg"
     frame.write_bytes(b"\xff\xd8jpeg")
-    provider, client = _provider([{"lines": [{"at": 0, "text": "Goal."}]}, {"lines": [{"at": 0, "text": "Goal."}]}])
+    provider, client = _provider([{"lines": [{"at": 0, "text": "Goal."}]}] * 4)             # each thin answer is asked for twice
     provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6",
                              instructions="  Hype sports\ncommentator. ")
     text = client.calls[0]["messages"][0]["content"][-1]["text"]
     assert "<narration_style>\nHype sports commentator.\n</narration_style>" in text
     assert "does not change the word budget" in text and "does not permit saying anything" in text
     provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6")
-    assert "narration_style" not in client.calls[1]["messages"][0]["content"][-1]["text"]
+    assert all("narration_style" not in block.get("text", "") for block in client.calls[2]["messages"][0]["content"])
     assert llm.style_block("") == "" and llm.style_block(None) == ""
     assert len(llm.style_block("x" * 5000)) < 1900                          # capped
 
@@ -274,7 +289,7 @@ def _gemini(monkeypatch, response):
     provider.fallback_models = ()                    # one model only, unless a test is about fallback
     sent = {}
 
-    def fake_post(body, model=None):
+    def fake_post(body, model=None, timeout_s=None):
         sent["body"] = body
         return response
 
@@ -308,7 +323,7 @@ def test_gemini_sends_frames_as_inline_images(monkeypatch, tmp_path):
     provider, sent = _gemini(monkeypatch, _gemini_answer({"lines": [{"at": 1, "text": "Speed walks into the water."}]}))
     assert provider.write_narration("Oh my god!", [frame], 31.0, 78, "IShowSpeed", "GTA 6") == "[1.0] Speed walks into the water."
     parts = sent["body"]["contents"][0]["parts"]
-    assert [list(p)[0] for p in parts] == ["text", "inlineData", "text"]
+    assert [list(p)[0] for p in parts][:3] == ["text", "inlineData", "text"]
     assert parts[1]["inlineData"]["mimeType"] == "image/jpeg" and parts[1]["inlineData"]["data"]
 
 
@@ -342,14 +357,14 @@ def test_gemini_waits_out_a_rate_limit_and_sends_long_transcripts_in_parts(monke
     answers = [FakeResponse(429, {"error": {"message": "quota"}}),
                _gemini_answer({"segments": []})]
     calls = []
-    monkeypatch.setattr(provider, "_post", lambda body, model=None: (calls.append(body), answers.pop(0))[1])
+    monkeypatch.setattr(provider, "_post", lambda body, model=None, timeout_s=None: (calls.append(body), answers.pop(0))[1])
     assert provider.select_segments(_request(), None) == []
     assert len(calls) == 2                                      # tried again after the "slow down"
 
     # Three refusals in a row is a real failure, reported as a rate limit.
     stuck = llm.GeminiProvider(model="gemini-3.8-flash", api_key="AIza-test-key-123456789")
     stuck.rate_limit_waits_s = (0, 0)
-    monkeypatch.setattr(stuck, "_post", lambda body, model=None: FakeResponse(429, {"error": {"message": "quota"}}))
+    monkeypatch.setattr(stuck, "_post", lambda body, model=None, timeout_s=None: FakeResponse(429, {"error": {"message": "quota"}}))
     with pytest.raises(llm.LLMError, match="rate limit"):
         stuck.select_segments(_request(), None)
 
@@ -362,7 +377,7 @@ def test_gemini_retries_when_google_is_briefly_unavailable(monkeypatch):
     provider.rate_limit_waits_s = provider.unavailable_waits_s = (0, 0)
     answers = [FakeResponse(503, {}), FakeResponse(500, {}), _gemini_answer({"segments": []})]
     calls = []
-    monkeypatch.setattr(provider, "_post", lambda body, model=None: (calls.append(1), answers.pop(0))[1])
+    monkeypatch.setattr(provider, "_post", lambda body, model=None, timeout_s=None: (calls.append(1), answers.pop(0))[1])
     assert provider.select_segments(_request(), None) == []
     assert len(calls) == 3                                      # two "unavailable" answers were waited out
 
@@ -370,7 +385,7 @@ def test_gemini_retries_when_google_is_briefly_unavailable(monkeypatch):
     down.rate_limit_waits_s = down.unavailable_waits_s = (0, 0)
     tries = []
     down.fallback_models = ()
-    monkeypatch.setattr(down, "_post", lambda body, model=None: (tries.append(1), FakeResponse(503, {}))[1])
+    monkeypatch.setattr(down, "_post", lambda body, model=None, timeout_s=None: (tries.append(1), FakeResponse(503, {}))[1])
     with pytest.raises(llm.LLMError, match="temporarily unavailable"):
         down.select_segments(_request(), None)
     assert len(tries) == 3                                      # gives up after the two waits
@@ -381,7 +396,7 @@ def test_gemini_falls_back_to_a_lighter_model_when_the_chosen_one_is_overloaded(
     provider.rate_limit_waits_s = provider.unavailable_waits_s = (0, 0)
     asked = []
 
-    def fake_post(body, model=None):
+    def fake_post(body, model=None, timeout_s=None):
         asked.append(model)
         if model == "gemini-3.8-flash":
             return FakeResponse(503, {"error": {"message": "This model is currently experiencing high demand."}})
@@ -394,14 +409,14 @@ def test_gemini_falls_back_to_a_lighter_model_when_the_chosen_one_is_overloaded(
     assert provider.usage[-1]["model"] == "gemini-3.5-flash-lite"             # usage is logged against what answered
 
     # When every model is overloaded, the error is the chosen model's, in Google's words.
-    monkeypatch.setattr(provider, "_post", lambda body, model=None: FakeResponse(
+    monkeypatch.setattr(provider, "_post", lambda body, model=None, timeout_s=None: FakeResponse(
         503, {"error": {"message": "This model is currently experiencing high demand."}}))
     with pytest.raises(llm.LLMError, match="Google says: This model is currently experiencing high demand"):
         provider.select_segments(_request(), None)
 
     # A wrong key or a bad request is not a reason to try other models.
     asked.clear()
-    monkeypatch.setattr(provider, "_post", lambda body, model=None: (asked.append(model), FakeResponse(403, {}))[1])
+    monkeypatch.setattr(provider, "_post", lambda body, model=None, timeout_s=None: (asked.append(model), FakeResponse(403, {}))[1])
     with pytest.raises(llm.LLMError, match="key was rejected"):
         provider.select_segments(_request(), None)
     assert asked == ["gemini-3.8-flash"]
@@ -438,3 +453,34 @@ def test_no_key_means_no_provider(monkeypatch):
     assert llm.get_provider({"llm": {"provider": "anthropic", "model": "claude-haiku-5-5"}}) is None
     with pytest.raises(llm.LLMError):
         llm.get_provider({"llm": {"provider": "something-else"}})
+
+
+def test_gemini_narration_tries_the_stronger_free_models_first(monkeypatch):
+    provider = llm.GeminiProvider(model="gemini-3.5-flash-lite", api_key="AIza-test-key-123456789")
+    provider.rate_limit_waits_s = provider.unavailable_waits_s = (0, 0)
+    asked, down = [], {"gemini-3.8-flash"}
+
+    def fake_post(body, model=None, timeout_s=None):
+        asked.append((model, timeout_s))
+        if model in down:
+            return FakeResponse(503, {"error": {"message": "This model is currently experiencing high demand."}})
+        return _gemini_answer({"lines": [{"at": 1, "text": "Speed finds a tiger."}]})
+
+    monkeypatch.setattr(provider, "_post", fake_post)
+    assert provider.rewrite_narration("Speed finds a tiger", "", 30.0, 70) == "[1.0] Speed finds a tiger."
+    quick = provider.narration_timeout_s
+    assert asked == [("gemini-3.8-flash", quick), ("gemini-3-flash-preview", quick)]   # one short try each, no waiting
+    assert provider.usage[-1]["model"] == "gemini-3-flash-preview" and provider.fallbacks_used == []
+
+    # With every stronger model busy, limited or gone, the chosen model still writes it.
+    asked.clear()
+    down.update({"gemini-3-flash-preview"})
+    assert provider.rewrite_narration("Speed finds a tiger", "", 30.0, 70) == "[1.0] Speed finds a tiger."
+    assert [m for m, _ in asked] == ["gemini-3.8-flash", "gemini-3-flash-preview", "gemini-3.5-flash-lite"]
+
+    # Other jobs do not touch the stronger models.
+    asked.clear()
+    monkeypatch.setattr(provider, "_post", lambda body, model=None, timeout_s=None: (
+        asked.append(model), _gemini_answer({"segments": []}))[1])
+    provider.select_segments(_request(), None)
+    assert asked == ["gemini-3.5-flash-lite"]

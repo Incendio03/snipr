@@ -11,6 +11,7 @@ loudness figures. Never audio or video.
 from __future__ import annotations
 
 import json
+import re
 import os
 from dataclasses import dataclass, field
 
@@ -366,11 +367,25 @@ class Provider:
             f"Working title from selection: {working_title or 'none'}",
             f"Clip length: {clip_seconds:.0f} seconds",
             f"Word budget: {word_budget} words",
+            narration_size(clip_seconds, word_budget)[2],
             style_block(instructions),
             "", "<clip_transcript>", clip_text.strip() or "(no speech)", "</clip_transcript>",
         ])})
-        answer = self._ask("narration", NARRATION_SYSTEM, content, NARRATION_SCHEMA, 8000)
-        return timed_script(answer.get("lines"), word_budget, clip_seconds)
+        min_lines, min_words, _ = narration_size(clip_seconds, word_budget)
+        script = ""
+        for attempt in range(2):
+            answer = self._ask("narration", NARRATION_SYSTEM, content, NARRATION_SCHEMA, 8000)
+            script = timed_script(answer.get("lines"), word_budget, clip_seconds)
+            words = len(re.sub(r"\[[^\]]*\]", " ", script).split())
+            if len(script.splitlines()) >= min_lines and words >= min_words:
+                break
+            if attempt == 0:
+                # Small models tend to hand back two or three short lines. Say so and ask once more.
+                content = content + [{"type": "text", "text": (
+                    f"Your last answer was too thin: {len(script.splitlines())} lines, {words} words:\n{script}\n"
+                    f"Write it again with at least {min_lines} lines and {min_words} words, spread over the whole "
+                    "clip, each line naming something specific that is seen or said at that moment.")}]
+        return script
 
     def total_tokens(self) -> dict:
         return {"input_tokens": sum(u["input_tokens"] for u in self.usage),
@@ -471,6 +486,12 @@ class GeminiProvider(Provider):
     # seconds on 2026-11-21 while gemini-3.8-flash and gemini-3.6-flash were refusing.
     fallback_models = ("gemini-3.5-flash-lite", "gemini-3.1-flash-lite")
     fallbacks_used: list = field(default_factory=list)
+    # Writing a narration is the one job where a stronger model clearly writes better, so
+    # these are tried first for it, newest first, before the chosen model. All are on the
+    # free tier (the Pro models are not: they answer "limit reached" on a free key). Each
+    # gets one short try, because the big Flash models are often overloaded.
+    narration_models = ("gemini-3.8-flash", "gemini-3-flash-preview")
+    narration_timeout_s = 45.0
 
     def _parts(self, prompt: str | list) -> list[dict]:
         if isinstance(prompt, str):
@@ -484,14 +505,14 @@ class GeminiProvider(Provider):
                 parts.append({"text": block.get("text", "")})
         return parts
 
-    def _post(self, body: dict, model: str | None = None):
+    def _post(self, body: dict, model: str | None = None, timeout_s: float | None = None):
         import httpx
 
         return httpx.post(f"{GEMINI_URL}/{model or self.model}:generateContent", json=body,
                           headers={"x-goog-api-key": self.api_key or "", "Content-Type": "application/json"},
-                          timeout=httpx.Timeout(self.request_timeout_s, connect=20.0))
+                          timeout=httpx.Timeout(timeout_s or self.request_timeout_s, connect=20.0))
 
-    def _send(self, body: dict, model: str, patient: bool):
+    def _send(self, body: dict, model: str, patient: bool, quick: bool = False):
         """Send one request to one model, waiting out what is worth waiting for.
 
         Two kinds of answer are waited out: "slow down" (429), where the
@@ -506,11 +527,14 @@ class GeminiProvider(Provider):
 
         slow_waits = list(self.rate_limit_waits_s)
         busy_waits = list(self.unavailable_waits_s) if patient else list(self.unavailable_waits_s[:1])
+        timeout_s = self.narration_timeout_s if quick else self.request_timeout_s
+        if quick:                       # an optional better model: one try, no waiting
+            slow_waits, busy_waits = [], []
         while True:
             try:
-                response = self._post(body, model)
+                response = self._post(body, model, timeout_s)
             except httpx.TimeoutException as exc:
-                raise _Overloaded(f"Gemini ({model}) did not answer within {self.request_timeout_s:.0f} seconds. "
+                raise _Overloaded(f"Gemini ({model}) did not answer within {timeout_s:.0f} seconds. "
                                   "It is probably overloaded; try again later or switch to another Gemini "
                                   "model in Settings.") from exc
             except httpx.HTTPError as exc:
@@ -523,7 +547,7 @@ class GeminiProvider(Provider):
                 time.sleep(busy_waits.pop(0))
             else:
                 break
-        if response.status_code in (500, 503):
+        if response.status_code in (500, 503) or (quick and response.status_code in (404, 429)):
             raise _Overloaded(self._error_text(response))
         if response.status_code != 200:
             raise LLMError(self._error_text(response))
@@ -539,17 +563,19 @@ class GeminiProvider(Provider):
         # The chosen model first. If it stays overloaded, the lighter free models are
         # tried so an unattended job is not lost to a busy hour on Google's side.
         candidates = [self.model] + [m for m in self.fallback_models if m != self.model]
+        better = [m for m in self.narration_models if m not in candidates] if purpose == "narration" else []
         response, answered_by, first_problem = None, self.model, None
-        for position, model in enumerate(candidates):
+        for model in better + candidates:
             try:
-                response = self._send(body, model, patient=position == 0)
+                response = self._send(body, model, patient=model == self.model, quick=model in better)
                 answered_by = model
                 break
             except _Overloaded as exc:
-                first_problem = first_problem or exc
+                if model not in better:
+                    first_problem = first_problem or exc
         if response is None:
             raise LLMError(str(first_problem))
-        if answered_by != self.model:
+        if answered_by != self.model and answered_by not in better:
             self.fallbacks_used.append(answered_by)
         data = response.json()
 
@@ -663,6 +689,20 @@ def style_block(instructions: str) -> str:
     return ("\nThe reviewer has said how they want this narrated. Follow it for tone, voice, pacing and "
             "structure. It does not change the word budget, and it does not permit saying anything the "
             f"frames and transcript do not support.\n<narration_style>\n{wanted}\n</narration_style>")
+
+
+def narration_size(clip_seconds: float, word_budget: int) -> tuple[int, int, str]:
+    """How much narration a clip of this length should get: least lines, least words, and the request for it.
+
+    Given as plain numbers because "leave gaps" on its own makes a small model
+    write almost nothing.
+    """
+    lines = max(3, min(8, round(clip_seconds / 9)))
+    target = max(12, round(word_budget * 0.45))
+    least_lines, least_words = max(2, lines - 1), max(8, round(word_budget * 0.3))
+    ask = (f"Write {lines} to {lines + 2} lines, about {target} words in total, spread from the first second "
+           f"to the last few seconds of the clip.")
+    return least_lines, least_words, ask
 
 
 def timed_script(lines, word_budget: int, clip_seconds: float) -> str:
