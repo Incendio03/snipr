@@ -100,11 +100,35 @@ def frame_filters(layout: dict | None, src_w: int, src_h: int) -> str:
     return f"[src]crop={w}:{h}:{x}:{y},scale={OUT_W}:{OUT_H}:flags=lanczos,setsar=1[base]"
 
 
+NARRATION_LEAD_S = 0.4            # the narrator starts this long after the clip does
+DUCKED_VOLUME = 0.16              # stream sound under a voiceover: about 16 dB down
+
+
+def audio_filters(rest: float, duration: float, narration_input: int | None, mix: str) -> str:
+    """The audio half of the filter graph, ending in ``[a]``.
+
+    Without a voiceover the stream's own sound is kept. With one, the stream
+    sound is lowered under the narrator ("duck") or dropped ("mute").
+    """
+    stream = (f"[0:a]atrim=start={rest:.3f}:duration={duration:.3f},asetpts=PTS-STARTPTS,"
+              f"aresample=async=1:first_pts=0")
+    if narration_input is None:
+        return f"{stream}[a]"
+    lead_ms = int(NARRATION_LEAD_S * 1000)
+    voice = f"[{narration_input}:a]aresample=48000,adelay={lead_ms}:all=1,apad=whole_dur={duration:.3f}"
+    if mix == "mute":
+        return f"{voice}[a]"
+    return (f"{stream},aresample=48000,volume={DUCKED_VOLUME}[bed];{voice}[vo];"
+            f"[bed][vo]amix=inputs=2:duration=first:dropout_transition=0:normalize=0[a]")
+
+
 def render_clip(source: Path, source_start: float, start: float, end: float, out: Path,
-                layout: dict | None, overlays=None, src_info: dict | None = None) -> Path:
+                layout: dict | None, overlays=None, src_info: dict | None = None,
+                narration: Path | None = None, mix: str = "duck") -> Path:
     """Render ``start``..``end`` (VOD time) as a 1080 x 1920 clip with headline and captions.
 
     ``overlays`` is a ``captions.Overlays``; None renders the picture alone.
+    ``narration`` is a voiceover audio file laid over the clip (see ``audio_filters``).
     """
     from .platforms import probe_video
 
@@ -134,8 +158,11 @@ def render_clip(source: Path, source_start: float, start: float, end: float, out
         graph.append(f"[{last}][{index}:v]overlay=0:{overlays.captions_y}:format=auto[withcaps]")
         last, index = "withcaps", index + 1
     graph.append(f"[{last}]format=yuv420p[v]")
-    graph.append(f"[0:a]atrim=start={rest:.3f}:duration={duration:.3f},asetpts=PTS-STARTPTS,"
-                 f"aresample=async=1:first_pts=0[a]")
+    narration_input = None
+    if narration is not None:
+        args += ["-i", str(narration)]
+        narration_input = index
+    graph.append(audio_filters(rest, duration, narration_input, mix))
     args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]",
              "-t", f"{duration:.3f}", *video_codec_args(), "-c:a", "aac", "-b:a", "160k",
              "-movflags", "+faststart", str(out)]

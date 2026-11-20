@@ -167,11 +167,30 @@ Until a crop rectangle is marked, Fill frame uses a centre crop. The layout can 
 
 **Headline.** A short hook of about 6 words, for example "Getting 5 stars in GTA 6" or "How to get X". The LLM writes it as its own field, separate from the post title, and it can be edited in review.
 
-**Spoken captions.** Word-by-word captions of what the streamer says, in the lower third, with the current word highlighted in the purple accent. There is one fixed style in v1. The Designer sets its exact look.
+**Spoken captions.** Word-by-word captions in the lower third, with the current word marked. There are two styles, chosen per streamer and changeable per clip:
+
+| Style | Look |
+|---|---|
+| Box (default) | Up to three words on a line in white with a dark outline; the current word sits on a purple box. The Designer's spec |
+| Bold | One or two heavy capitals at a time in white with a thick outline; the current word turns yellow. No box |
+
+**Headline switch.** The headline can be turned off per streamer or per clip. With the headline off and the Bold style, a Fill frame clip is just the footage with a caption near the bottom.
+
+Captions always stay above the bottom 380 pixels, where the apps draw the account name and description over the video.
 
 **Source footage.** Snipr does not download the whole VOD. It downloads only the audio for analysis, then fetches the picture for each chosen clip at 1080p with 20 seconds of padding on each side. A 24 hour stream needs about 1 GB instead of tens of GB. The padding is what lets a clip be extended in review; moving a cut beyond it triggers another short download. Each fetched piece is lined up with the analysis audio by its sound, so cuts and captions are frame-exact. Snipr checks free disk space before processing a stream.
 
 **Stacked proportions.** The facecam takes the top 1080 x 608 and the gameplay the bottom 1080 x 1312. In this layout the headline sits centred on the seam between them so it never covers the face. Crop rectangles are locked to the shape of their slot while being marked.
+
+### Voiceover (planned, milestone 7)
+
+An option per streamer, changeable per clip. With voiceover on, a clip is narrated instead of carrying only the streamer's own sound:
+
+1. **Script.** The LLM writes a short narration for the chosen moment, sized to the clip's length. It gets the clip's transcript and a few still frames from the clip, so it can describe what is on screen.
+2. **Voice.** A text-to-speech model that runs on this PC reads the script. The candidate is Kokoro (open source, Apache 2.0 licence, runs on the CPU), to be confirmed by testing on this machine. No account and no cost per clip.
+3. **Mix.** The stream's own sound is lowered under the narration, or muted. Captions follow the narrator's words.
+
+Voiceover needs the LLM, so it cannot run without an API key. It is the one place where still frames, not only text, are sent to the LLM.
 
 ## 7. Review
 
@@ -346,10 +365,11 @@ storage:
 | 2 | Selection tuning for all three modes, content flags | At least half the candidates are ones you would post |
 | 3 | Fill frame and Stacked layouts, headline, spoken captions | Output looks native on a phone |
 | 4 | Database, streamer form, approval queue with edit and reject reasons, notifications | You can add a streamer by link and approve, edit or reject each clip |
-| 5 | Destinations with a posting method each, posting slots, export with reminders, then YouTube API upload | An approved clip triggers a reminder at its slot and can be marked as posted; after switching the destination to API upload it appears on the chosen YouTube account |
+| 5 | Destinations with a posting method each, posting slots, export with reminders | An approved clip triggers a reminder at its slot and can be marked as posted |
 | 6 | Scheduler, processing window, retries | New VODs are processed with no manual step |
-| 7 | Kick ingest (YouTube ingest was built with milestone 1) | A Kick streamer produces clips |
-| 8 | TikTok and Facebook API upload | Same flow works on all three platforms |
+| 7 | Voiceover: narration script, local voice, audio mix, captions on the narrator | A clip plays with a narrated voice and matching captions |
+| 8 | Kick ingest (YouTube ingest was built with milestone 1) | A Kick streamer produces clips |
+| 9 | YouTube, TikTok and Facebook API upload | An approved clip posts itself on all three platforms |
 
 ## 16. Risks
 

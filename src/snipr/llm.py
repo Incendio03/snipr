@@ -97,6 +97,37 @@ game or topic.
 Write in plain English, in the register of the clip. Do not use emoji."""
 
 
+NARRATION_SCHEMA = {
+    "type": "object",
+    "properties": {"script": {"type": "string"}},
+    "required": ["script"],
+    "additionalProperties": False,
+}
+
+NARRATION_SYSTEM = """\
+You write the voiceover for a short vertical clip cut from a livestream. A narrator reads \
+your script over the footage while the stream's own sound plays quietly underneath, and the \
+script is also shown on screen as captions, a couple of words at a time.
+
+You are given still frames from the clip in the order they appear, the transcript of what \
+the streamer says during it, and a word budget.
+
+Write what a gaming channel's narrator would say over this moment: present tense, concrete, \
+about what is happening on screen and why it is worth watching. The first sentence is the \
+hook, so it must make someone stop scrolling. Follow the order of events in the frames so \
+the words match the picture as it plays.
+
+Only say what the frames and the transcript support. Do not invent facts about the game, \
+such as features, numbers or release details, and do not claim to know what the streamer \
+is thinking. Refer to the streamer by name where it reads naturally.
+
+The script is read aloud at a fixed pace, so the word budget is a hard limit: a script over \
+budget gets cut off before the clip ends. Aim for 85 to 100 percent of the budget.
+
+Write plain sentences only: no stage directions, no speaker labels, no emoji, no hashtags, \
+no quotation marks. Write numbers the way they should be spoken."""
+
+
 class LLMError(Exception):
     """The provider could not produce a usable answer."""
 
@@ -196,7 +227,8 @@ class AnthropicProvider:
             # With no explicit key the SDK resolves credentials from the environment.
             self.client = anthropic.Anthropic(api_key=self.api_key) if self.api_key else anthropic.Anthropic()
 
-    def _ask(self, purpose: str, system: str, prompt: str, schema: dict, max_tokens: int) -> dict:
+    def _ask(self, purpose: str, system: str, prompt: str | list, schema: dict, max_tokens: int) -> dict:
+        """One request. ``prompt`` is text, or a list of content blocks when images are included."""
         import anthropic
 
         try:
@@ -277,6 +309,33 @@ class AnthropicProvider:
         answer = self._ask("metadata", METADATA_SYSTEM, prompt, METADATA_SCHEMA, 8000)
         return clean_metadata(answer)
 
+    def write_narration(self, clip_text: str, frames: list, clip_seconds: float, word_budget: int,
+                        streamer: str, vod_title: str, working_title: str = "", game: str = "") -> str:
+        """A voiceover script for one clip, sized to ``word_budget`` words.
+
+        ``frames`` are JPEG files from the clip in order. They are the one place
+        where pictures, not only text, are sent to the provider.
+        """
+        import base64
+        from pathlib import Path
+
+        content: list = []
+        for index, frame in enumerate(frames, 1):
+            data = base64.standard_b64encode(Path(frame).read_bytes()).decode("ascii")
+            content.append({"type": "text", "text": f"Frame {index} of {len(frames)}:"})
+            content.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}})
+        content.append({"type": "text", "text": "\n".join([
+            f"Streamer: {streamer or 'unknown'}",
+            f"Stream title: {vod_title or 'unknown'}",
+            f"Game or topic: {game or 'unknown'}",
+            f"Working title from selection: {working_title or 'none'}",
+            f"Clip length: {clip_seconds:.0f} seconds",
+            f"Word budget: {word_budget} words",
+            "", "<clip_transcript>", clip_text.strip() or "(no speech)", "</clip_transcript>",
+        ])})
+        answer = self._ask("narration", NARRATION_SYSTEM, content, NARRATION_SCHEMA, 8000)
+        return clean_narration(answer.get("script", ""), word_budget)
+
     def total_tokens(self) -> dict:
         return {"input_tokens": sum(u["input_tokens"] for u in self.usage),
                 "output_tokens": sum(u["output_tokens"] for u in self.usage),
@@ -307,6 +366,20 @@ def clean_metadata(raw: dict) -> dict:
         "description": str(raw.get("description") or "").strip(),
         "hashtags": tags[:5],
     }
+
+
+def clean_narration(script: str, word_budget: int) -> str:
+    """Tidy a narration script and cut it at a sentence end if it runs over budget."""
+    text = " ".join(str(script).replace('"', "").replace("“", "").replace("”", "").split())
+    words = text.split()
+    limit = int(word_budget * 1.1)                  # a little over is spoken slightly faster instead
+    if len(words) <= limit:
+        return text
+    kept = words[:limit]
+    for index in range(len(kept) - 1, max(0, len(kept) // 2), -1):
+        if kept[index].endswith((".", "!", "?")):
+            return " ".join(kept[: index + 1])
+    return " ".join(kept).rstrip(",;:") + "."
 
 
 def fallback_metadata(clip_text: str, vod_title: str, game: str = "") -> dict:

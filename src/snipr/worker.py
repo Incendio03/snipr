@@ -101,7 +101,10 @@ def streamer_layout(streamer: dict) -> dict:
     return {"type": streamer["layout"], "crop": streamer["crop_rect"],
             "facecam": streamer["facecam_rect"], "gameplay": streamer["gameplay_rect"],
             "caption_style": streamer.get("caption_style") or "box",
-            "show_headline": bool(streamer.get("show_headline", 1))}
+            "show_headline": bool(streamer.get("show_headline", 1)),
+            "voiceover": bool(streamer.get("voiceover", 0)),
+            "voice": streamer.get("voice") or "am_michael",
+            "mix": streamer.get("voiceover_mix") or "duck"}
 
 
 def credit_line(streamer: dict) -> str:
@@ -136,9 +139,37 @@ def _record_usage(vod_id: int, provider) -> None:
     provider.usage.clear()
 
 
-def render_one(clip: dict, vod: dict, analysis_audio: Path | None, transcript: dict, settings: dict,
-               progress=None) -> None:
-    """Fetch the footage for a clip if needed, render it, and save a thumbnail."""
+def clip_frames(clip: dict, count: int = 4) -> list[Path]:
+    """Still frames spread across a clip, for the narration script. Needs the clip's footage."""
+    import tempfile
+
+    folder = Path(tempfile.mkdtemp(prefix="snipr-frames-"))
+    length = clip["end_s"] - clip["start_s"]
+    offset = clip["start_s"] - clip["source_start"]
+    frames = []
+    for index in range(count):
+        at = offset + length * (index + 0.5) / count
+        frames.append(render.grab_frame(Path(clip["source_path"]), at, folder / f"frame{index + 1}.jpg", width=768))
+    return frames
+
+
+def write_narration(clip: dict, vod: dict, streamer: dict, transcript: dict, provider) -> str:
+    """Ask the LLM for a voiceover script for a clip whose footage is on disk."""
+    from . import voice
+
+    frames = clip_frames(clip)
+    try:
+        length = clip["end_s"] - clip["start_s"]
+        game = next((c["title"] for c in (vod["chapters"] or []) if c["start"] <= clip["start_s"] < c["end"]), "")
+        return provider.write_narration(
+            transcribe.text_between(transcript, clip["start_s"], clip["end_s"]), frames, length,
+            voice.word_budget(length), streamer["name"], vod["title"], clip["working_title"], game)
+    finally:
+        shutil.rmtree(frames[0].parent, ignore_errors=True)
+
+
+def ensure_source(clip: dict, vod: dict, analysis_audio: Path | None, settings: dict, progress=None) -> dict:
+    """Make sure the footage covering a clip is on disk. Returns the clip with its source fields."""
     clip_id = clip["id"]
     pad = float(settings["ingest"]["source_pad_s"])
     source = Path(clip["source_path"]) if clip.get("source_path") else None
@@ -163,11 +194,19 @@ def render_one(clip: dict, vod: dict, analysis_audio: Path | None, transcript: d
         db.update("clips", clip_id, {"source_path": str(source), "source_start": source_start,
                                      "source_end": source_end})
         clip = {**clip, "source_path": str(source), "source_start": source_start, "source_end": source_end}
+    return clip
+
+
+def render_one(clip: dict, vod: dict, analysis_audio: Path | None, transcript: dict, settings: dict,
+               progress=None) -> None:
+    """Fetch the footage for a clip if needed, render it, and save a thumbnail."""
+    clip = ensure_source(clip, vod, analysis_audio, settings, progress)
+    clip_id = clip["id"]
     if progress:
         progress("Rendering", None)
     out = config.subdir("clips") / f"{clip_id}.mp4"
     pipeline.produce(Path(clip["source_path"]), clip["source_start"], clip["start_s"], clip["end_s"],
-                     transcript, clip["headline"], clip["layout"], out)
+                     transcript, clip["headline"], clip["layout"], out, clip.get("narration") or "", settings)
     render.grab_frame(out, min(2.0, (clip["end_s"] - clip["start_s"]) / 2),
                       config.subdir("thumbs") / f"{clip_id}.jpg", width=360)
     db.execute("UPDATE clips SET file_path = ?, render_state = 'ready', render_error = NULL, "
@@ -240,8 +279,22 @@ def process_vod(job: dict, settings: dict) -> None:
             "hashtags": meta["hashtags"], "working_title": pick.title, "status": "candidate",
             "render_state": "rendering", "destination_ids": default_destinations, "created_at": db.now()})
         try:
-            render_one(db.get("clips", clip_id), vod, analysis.audio_path, analysis.transcript, settings,
-                       lambda stage, f, i=index: progress(f"{stage}: clip {i} of {len(picks)}", (i - 1) / len(picks)))
+            step = lambda stage, f, i=index: progress(f"{stage}: clip {i} of {len(picks)}", (i - 1) / len(picks))  # noqa: E731
+            if layout["voiceover"]:
+                if provider is None:
+                    if index == 1:
+                        db.event(f"Voiceover is on for {streamer['name']} but needs an API key to write the "
+                                 "narration. These clips keep the stream's own sound.", "warn", vod_id=vod["id"])
+                else:
+                    with_source = ensure_source(db.get("clips", clip_id), vod, analysis.audio_path, settings, step)
+                    step("Writing narration", None)
+                    try:
+                        script = write_narration(with_source, vod, streamer, analysis.transcript, provider)
+                        db.update("clips", clip_id, {"narration": script})
+                    except llm.LLMError as exc:
+                        db.event(f"The narration for a clip from \"{info.title}\" could not be written: {exc}",
+                                 "warn", vod_id=vod["id"], clip_id=clip_id)
+            render_one(db.get("clips", clip_id), vod, analysis.audio_path, analysis.transcript, settings, step)
             db.update("clips", clip_id, {"status": "pending_review"})
             ready += 1
         except Exception as exc:  # noqa: BLE001 - one bad clip must not sink the rest of the stream

@@ -21,7 +21,8 @@ from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
-from .. import __version__, config, db, llm, pipeline, platforms, publish, scheduler, secrets, selection, transcribe, worker
+from .. import (__version__, config, db, llm, pipeline, platforms, publish, scheduler, secrets, selection,
+                transcribe, voice, worker)
 from ..platforms import PlatformError, VodInfo
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -30,8 +31,10 @@ FONT_DIR = Path(__file__).parent.parent / "assets" / "fonts"
 MODES = ("highlights", "informative", "custom")
 LAYOUTS = ("fill", "stacked")
 CAPTION_STYLES = ("box", "bold")
+MIXES = ("duck", "mute")
 LAYOUT_DEFAULTS = {"type": "fill", "crop": None, "facecam": None, "gameplay": None,
-                   "caption_style": "box", "show_headline": True}
+                   "caption_style": "box", "show_headline": True,
+                   "voiceover": False, "voice": voice.DEFAULT_VOICE, "mix": "duck"}
 DEST_PLATFORMS = ("youtube", "tiktok", "facebook")
 REJECT_REASONS = (None, "boring", "bad_cut", "wrong_topic", "bad_framing", "other")
 WHISPER_MODELS = ("small", "medium", "large-v3")
@@ -124,7 +127,8 @@ def streamer_out(s: dict) -> dict:
         "max_clips_per_vod": s["max_clips_per_vod"], "clip_min_s": s["clip_min_s"], "clip_max_s": s["clip_max_s"],
         "layout": s["layout"], "crop_rect": s["crop_rect"], "facecam_rect": s["facecam_rect"],
         "gameplay_rect": s["gameplay_rect"], "caption_style": s["caption_style"],
-        "show_headline": bool(s["show_headline"]), "default_destination_id": s["default_destination_id"],
+        "show_headline": bool(s["show_headline"]), "voiceover": bool(s["voiceover"]), "voice": s["voice"],
+        "voiceover_mix": s["voiceover_mix"], "default_destination_id": s["default_destination_id"],
         "enabled": bool(s["enabled"]),
         "sample_frame": _frame_info(s["sample_frame"], s["sample_w"], s["sample_h"]),
         "stats": {"pending": counts.get("pending_review", 0), "approved": counts.get("approved", 0),
@@ -150,7 +154,7 @@ def clip_out(c: dict) -> dict:
         "score": c["score"], "min_score": float(config.load_settings()["selection"]["min_score"]),
         "mode": streamer["mode"], "reason": c["reason"], "flags": c["flags"], "layout": layout,
         "headline": c["headline"], "title": c["title"], "description": c["description"], "credit": c["credit"],
-        "hashtags": c["hashtags"],
+        "hashtags": c["hashtags"], "narration": c["narration"],
         "status": "pending_review" if c["status"] == "candidate" else c["status"],
         "reject_reason": c["reject_reason"],
         "render_state": c["render_state"] if c["render_state"] != "ready" or ready else "failed",
@@ -224,11 +228,13 @@ def _streamer_fields(body: dict, current: dict | None) -> dict:
     merged = dict(current or {"mode": "highlights", "instructions": "", "games": "", "max_clips_per_vod": 5,
                               "clip_min_s": 20, "clip_max_s": 60, "layout": "fill", "crop_rect": None,
                               "facecam_rect": None, "gameplay_rect": None, "caption_style": "box",
-                              "show_headline": True, "default_destination_id": None, "enabled": True})
+                              "show_headline": True, "voiceover": False, "voice": voice.DEFAULT_VOICE,
+                              "voiceover_mix": "duck", "default_destination_id": None, "enabled": True})
     out: dict = {}
-    if "show_headline" in body:
-        out["show_headline"] = bool(body["show_headline"])
-    for key in ("name", "mode", "instructions", "games", "layout", "caption_style"):
+    for key in ("show_headline", "voiceover"):
+        if key in body:
+            out[key] = bool(body[key])
+    for key in ("name", "mode", "instructions", "games", "layout", "caption_style", "voice", "voiceover_mix"):
         if key in body:
             if not isinstance(body[key], str):
                 raise bad(f"{key} must be text.")
@@ -258,6 +264,10 @@ def _streamer_fields(body: dict, current: dict | None) -> dict:
         raise bad("Layout must be Fill frame or Stacked.")
     if merged["caption_style"] not in CAPTION_STYLES:
         raise bad("Caption style must be Box or Bold.")
+    if merged["voice"] not in voice.voice_ids():
+        raise bad("Pick one of the listed voices.")
+    if merged["voiceover_mix"] not in MIXES:
+        raise bad("Stream sound under a voiceover must be Lowered or Muted.")
     if merged["mode"] == "custom" and not merged["instructions"].strip():
         raise bad("Custom mode needs instructions describing what to look for.")
     if merged["clip_min_s"] > merged["clip_max_s"]:
@@ -430,11 +440,11 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
     vod = db.get("vods", clip["vod_id"])
     streamer = db.get("streamers", vod["streamer_id"])
     values: dict = {}
-    for key in ("headline", "title", "description", "credit"):
+    for key in ("headline", "title", "description", "credit", "narration"):
         if key in body:
             if not isinstance(body[key], str):
                 raise bad(f"{key.capitalize()} must be text.")
-            values[key] = body[key].strip()
+            values[key] = " ".join(body[key].split()) if key == "narration" else body[key].strip()
     if "hashtags" in body:
         if not isinstance(body["hashtags"], list):
             raise bad("Hashtags must be a list.")
@@ -468,19 +478,38 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
         style = layout.get("caption_style", current_layout["caption_style"])
         if style not in CAPTION_STYLES:
             raise bad("Caption style must be Box or Bold.")
+        speaker = layout.get("voice", current_layout["voice"])
+        if speaker not in voice.voice_ids():
+            raise bad("Pick one of the listed voices.")
+        mix = layout.get("mix", current_layout["mix"])
+        if mix not in MIXES:
+            raise bad("Stream sound under a voiceover must be Lowered or Muted.")
         new_layout = {"type": layout["type"], "crop": _rect(layout.get("crop"), "Crop area"),
                       "facecam": _rect(layout.get("facecam"), "Facecam area"),
                       "gameplay": _rect(layout.get("gameplay"), "Gameplay area"),
                       "caption_style": style,
-                      "show_headline": bool(layout.get("show_headline", current_layout["show_headline"]))}
+                      "show_headline": bool(layout.get("show_headline", current_layout["show_headline"])),
+                      "voiceover": bool(layout.get("voiceover", current_layout["voiceover"])),
+                      "voice": speaker, "mix": mix}
         if new_layout["type"] == "stacked" and not (new_layout["facecam"] and new_layout["gameplay"]):
             raise bad("Stacked layout needs both rectangles marked: the facecam and the gameplay.")
         values["layout"] = new_layout
 
+    final_layout = values.get("layout", current_layout)
+    narration = values.get("narration", clip["narration"])
+    if final_layout["voiceover"]:
+        if not narration:
+            raise bad("Voiceover is on but there is no narration yet. Write one, or switch voiceover off.")
+        length = values.get("end_s", clip["end_s"]) - values.get("start_s", clip["start_s"])
+        budget = int(voice.word_budget(length) * 1.3)       # the narrator can speed up by about a third
+        if len(narration.split()) > budget:
+            raise bad(f"The narration is {len(narration.split())} words. About {budget} is the most that "
+                      f"fits a {length:.0f} second clip. Shorten it or lengthen the clip.")
     rerender = (values.get("start_s", clip["start_s"]) != clip["start_s"]
                 or values.get("end_s", clip["end_s"]) != clip["end_s"]
                 or values.get("headline", clip["headline"]) != clip["headline"]
                 or ("layout" in values and values["layout"] != current_layout)
+                or (final_layout["voiceover"] and narration != clip["narration"])
                 or clip["render_state"] == "failed")
     if rerender:
         values.update(render_state="rendering", render_error=None)
@@ -489,6 +518,38 @@ def update_clip(clip_id: int, body: dict = Body(...)) -> dict:
         worker.enqueue("render_clip", clip_id, f"Re-render: {values.get('headline', clip['headline']) or 'clip'}",
                        force=True)
     return clip_out(db.get("clips", clip_id))
+
+
+@app.post("/api/clips/{clip_id}/write-narration")
+def write_clip_narration(clip_id: int) -> dict:
+    """Have the LLM draft a voiceover script for a clip. The draft is returned, not saved."""
+    clip = _need("clips", clip_id, "clip")
+    vod = db.get("vods", clip["vod_id"])
+    streamer = db.get("streamers", vod["streamer_id"])
+    provider = llm.get_provider(config.load_settings())
+    if provider is None:
+        raise bad("Writing a narration needs an Anthropic API key. Add one in Settings, or type the "
+                  "narration yourself.", 409)
+    folder = pipeline.vod_dir(VodInfo(vod["platform"], vod["vod_key"], vod["source_url"], vod["title"], vod["duration"]))
+    if not clip["source_path"] or not Path(clip["source_path"]).exists() or not (folder / "transcript.json").exists():
+        raise bad("The footage for this clip has been cleaned up, so a narration cannot be drafted from it. "
+                  "You can still type one.", 409)
+    try:
+        script = worker.write_narration(clip, vod, streamer, transcribe.load(folder / "transcript.json"), provider)
+    except llm.LLMError as exc:
+        raise bad(str(exc), 502) from exc
+    db.execute("UPDATE vods SET tokens_in = tokens_in + ?, tokens_out = tokens_out + ?, "
+               "llm_requests = llm_requests + ? WHERE id = ?",
+               (*[provider.total_tokens()[k] for k in ("input_tokens", "output_tokens", "requests")], vod["id"]))
+    return {"narration": script, "words": len(script.split()),
+            "word_budget": voice.word_budget(clip["end_s"] - clip["start_s"])}
+
+
+@app.get("/api/voices")
+def list_voices() -> dict:
+    return {"voices": [{"id": voice_id, "label": label} for voice_id, label in voice.VOICES],
+            "default": voice.DEFAULT_VOICE, "model_ready": voice.model_ready(),
+            "words_per_second": voice.WORDS_PER_SECOND}
 
 
 def _destination_ids(value) -> list[int]:
@@ -705,9 +766,16 @@ def add_vod(body: dict = Body(...)) -> dict:
     streamer = _need("streamers", int(body.get("streamer_id") or 0), "streamer")
     try:
         platform, key = platforms.parse_vod_url(str(body.get("url") or ""))
-        if db.row("SELECT id FROM vods WHERE streamer_id = ? AND platform = ? AND vod_key = ? AND status != 'ignored'",
-                  (streamer["id"], platform, key)):
-            raise bad("This stream has already been processed for this streamer.", 409)
+        known = db.row("SELECT * FROM vods WHERE streamer_id = ? AND platform = ? AND vod_key = ? AND status != 'ignored'",
+                       (streamer["id"], platform, key))
+        if known:
+            # Processing it again reuses the saved transcript and only adds moments not already clipped,
+            # which is how new instructions or a newly added API key are applied to a stream.
+            if known["status"] in ("queued", "processing"):
+                raise bad("This stream is already being processed.", 409)
+            db.update("vods", known["id"], {"status": "queued", "error": None, "updated_at": db.now()})
+            job_id = worker.enqueue("process_vod", known["id"], f"{streamer['name']}: {known['title']}", force=True)
+            return {"job_id": job_id, "message": "Queued again. Clips already made from this stream are kept."}
         info = platforms.vod_info(str(body["url"]))
     except PlatformError as exc:
         raise bad(str(exc), 400) from exc

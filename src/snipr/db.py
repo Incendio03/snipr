@@ -192,6 +192,10 @@ def connect() -> Iterator[sqlite3.Connection]:
 ADDED_COLUMNS = [
     ("streamers", "caption_style", "TEXT NOT NULL DEFAULT 'box'"),
     ("streamers", "show_headline", "INTEGER NOT NULL DEFAULT 1"),
+    ("streamers", "voiceover", "INTEGER NOT NULL DEFAULT 0"),
+    ("streamers", "voice", "TEXT NOT NULL DEFAULT 'am_michael'"),
+    ("streamers", "voiceover_mix", "TEXT NOT NULL DEFAULT 'duck'"),
+    ("clips", "narration", "TEXT NOT NULL DEFAULT ''"),
 ]
 
 

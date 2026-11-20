@@ -168,6 +168,17 @@ def test_crop_rect_is_fitted_to_ratio_inside_the_marked_area():
     assert x + w <= 1920 and y + h <= 1080 and w % 2 == 0 and h % 2 == 0
 
 
+def test_audio_filters_keep_duck_or_mute_the_stream_sound():
+    plain = render.audio_filters(10.0, 30.0, None, "duck")
+    assert plain.startswith("[0:a]atrim=start=10.000:duration=30.000") and plain.endswith("[a]")
+    assert "amix" not in plain and "volume" not in plain
+    duck = render.audio_filters(10.0, 30.0, 3, "duck")
+    assert "[3:a]" in duck and "adelay=400:all=1" in duck and f"volume={render.DUCKED_VOLUME}" in duck
+    assert "amix=inputs=2:duration=first" in duck and "normalize=0" in duck
+    mute = render.audio_filters(10.0, 30.0, 3, "mute")
+    assert "[0:a]" not in mute and "[3:a]" in mute and "apad=whole_dur=30.000" in mute
+
+
 def test_frame_filters_for_fill_and_stacked():
     fill = render.frame_filters({"type": "fill", "crop": None}, 1920, 1080)
     assert fill == "[src]crop=606:1080:656:0,scale=1080:1920:flags=lanczos,setsar=1[base]"

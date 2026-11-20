@@ -138,24 +138,57 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, transcript, stats)
 
 
+def narrate(script: str, clip_seconds: float, out_wav: Path, voice_id: str, settings: dict) -> list[list]:
+    """Speak a narration script and return its words timed on the clip's clock.
+
+    If the narration would run past the end of the clip it is spoken again a
+    little faster. The words are timed by transcribing the spoken audio and
+    mapping the result back onto the script (see ``voice.align_script``).
+    """
+    from . import render, voice
+
+    room = max(2.0, clip_seconds - render.NARRATION_LEAD_S - 0.3)
+    length = voice.synthesize(script, out_wav, voice_id)
+    if length > room:
+        length = voice.synthesize(script, out_wav, voice_id, speed=min(1.3, length / room * 1.02))
+    cfg = settings["transcription"]
+    heard, _ = transcribe.transcribe(out_wav, cfg["model"], cfg["compute_type"], int(cfg.get("batch_size", 8)))
+    heard_words = [w for seg in heard["segments"] for w in seg["w"]]
+    lead = render.NARRATION_LEAD_S
+    return [[w[0] + lead, w[1] + lead, w[2]] for w in voice.align_script(script, heard_words, length)]
+
+
 def produce(source: Path, source_start: float, start: float, end: float, transcript: dict,
-            headline: str, layout: dict | None, out_path: Path) -> Path:
-    """Render one clip: reframe to 9:16, burn in the headline and the captions."""
+            headline: str, layout: dict | None, out_path: Path, narration: str = "",
+            settings: dict | None = None) -> Path:
+    """Render one clip: reframe to 9:16, burn in the headline and the captions.
+
+    With voiceover switched on in ``layout`` and a ``narration`` script, the
+    script is spoken over the clip and the captions follow the narrator
+    instead of the streamer.
+    """
     import shutil
     import tempfile
 
     from . import captions, render
 
-    words = [[w[0] - start, w[1] - start, w[2]] for w in transcribe.words_between(transcript, start, end)]
-    overlay_dir = Path(tempfile.mkdtemp(prefix="snipr-overlay-"))
     options = layout or {}
+    work_dir = Path(tempfile.mkdtemp(prefix="snipr-overlay-"))
     try:
+        voice_wav: Path | None = None
+        if options.get("voiceover") and narration.strip():
+            voice_wav = work_dir / "narration.wav"
+            words = narrate(narration, end - start, voice_wav, options.get("voice") or "",
+                            settings or config.load_settings())
+        else:
+            words = [[w[0] - start, w[1] - start, w[2]] for w in transcribe.words_between(transcript, start, end)]
         overlays = captions.build_overlays(
-            words, headline if options.get("show_headline", True) else "", end - start, overlay_dir,
+            words, headline if options.get("show_headline", True) else "", end - start, work_dir / "overlay",
             stacked=render.is_stacked(layout), style=captions.get_style(options.get("caption_style")))
-        return render.render_clip(source, source_start, start, end, out_path, layout, overlays)
+        return render.render_clip(source, source_start, start, end, out_path, layout, overlays,
+                                  narration=voice_wav, mix=options.get("mix") or "duck")
     finally:
-        shutil.rmtree(overlay_dir, ignore_errors=True)
+        shutil.rmtree(work_dir, ignore_errors=True)
 
 
 def fetch_source(vod: VodInfo, analysis_audio: Path, span_start: float, start: float, end: float,

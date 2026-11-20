@@ -154,6 +154,31 @@ def test_write_metadata_cleans_the_answer():
     assert "GTA 6" in client.calls[0]["messages"][0]["content"]
 
 
+def test_write_narration_sends_frames_in_order_with_the_word_budget(tmp_path):
+    frames = []
+    for index in range(2):
+        frame = tmp_path / f"frame{index}.jpg"
+        frame.write_bytes(b"\xff\xd8jpeg-bytes-%d" % index)
+        frames.append(frame)
+    provider, client = _provider([{"script": '"Speed walks straight into the water." The crocodile does not wait.'}])
+    script = provider.write_narration("Oh my god!", frames, 31.0, 78, "IShowSpeed", "GTA 6 day 2", game="GTA 6")
+    assert script == "Speed walks straight into the water. The crocodile does not wait."
+    content = client.calls[0]["messages"][0]["content"]
+    kinds = [block["type"] for block in content]
+    assert kinds == ["text", "image", "text", "image", "text"]
+    assert content[1]["source"]["media_type"] == "image/jpeg" and content[0]["text"] == "Frame 1 of 2:"
+    assert "Word budget: 78 words" in content[-1]["text"] and "Clip length: 31 seconds" in content[-1]["text"]
+    assert client.calls[0]["output_config"]["format"]["schema"] == llm.NARRATION_SCHEMA
+    assert provider.usage[-1]["purpose"] == "narration"
+
+
+def test_narration_over_budget_is_cut_at_a_sentence_end():
+    script = "One two three four five. Six seven eight nine ten. Eleven twelve thirteen fourteen fifteen."
+    assert llm.clean_narration(script, 20) == script
+    assert llm.clean_narration(script, 10) == "One two three four five. Six seven eight nine ten."
+    assert llm.clean_narration("a b c d e f g h i j k l m n o p", 10) == "a b c d e f g h i j k."
+
+
 def test_headline_is_capped_and_fallback_metadata_is_usable():
     assert len(llm.clean_metadata({"headline": "one two three four five six seven eight nine ten"})["headline"].split()) == 8
     meta = llm.fallback_metadata("Oh my god five stars they are all on me", "GTA 6 day 2", "GTA 6")

@@ -20,16 +20,29 @@ def _request(mode="highlights", **kw):
 
 def test_highlights_without_llm_picks_the_spike_and_cuts_on_sentences():
     picks = selection.select(_request(), None)
-    assert len(picks) == 1
-    clip = picks[0]
+    clip = picks[0]                                   # best first
     assert clip.start <= 900 and clip.end >= 929
     assert clip.start % 10 == 0                       # snapped to a sentence start
     assert 20 <= clip.end - clip.start <= 60
     assert "chat ran" in clip.reason
+    assert all(p.score >= selection.SIGNAL_ONLY_MIN_SCORE for p in picks)
+
+
+def test_without_llm_a_modest_spike_still_clears_the_bar_set_for_the_llm():
+    # In a busy chat a real spike is only a few deviations above baseline, which
+    # scores under the 0.6 bar meant for the LLM's own scores.
+    rng = np.random.default_rng(5)
+    chat = 20.0 + rng.normal(0, 4.0, 1800)
+    chat[900:930] += 3.6
+    loud = np.full(1800, -30.0)                       # flat sound: chat alone carries the score
+    picks = selection.select(_request(chat_rate=chat, loudness=loud, min_score=0.6), None)
+    spike = [p for p in picks if p.start <= 915 <= p.end]
+    assert spike and selection.SIGNAL_ONLY_MIN_SCORE <= spike[0].score < 0.6
 
 
 def test_highlights_stays_inside_the_allowed_ranges():
-    assert selection.select(_request(ranges=[(0.0, 600.0)]), None) == []
+    picks = selection.select(_request(ranges=[(0.0, 600.0)]), None)
+    assert all(0 <= p.start and p.end <= 601 for p in picks)       # the spike at 900 is out of bounds
 
 
 def test_highlights_hands_nominations_to_the_llm():

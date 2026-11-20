@@ -93,7 +93,9 @@ def test_review_queue_lists_clips_with_everything_the_page_needs(client, seeded)
     assert clip["video_url"] == f"/media/clips/{clip['id']}.mp4?v=0" and clip["render_state"] == "ready"
     assert clip["source_range"] == {"start_s": 8028.0, "end_s": 8109.0}
     assert clip["layout"] == {"type": "fill", "crop": None, "facecam": None, "gameplay": None,
-                              "caption_style": "box", "show_headline": True}
+                              "caption_style": "box", "show_headline": True,
+                              "voiceover": False, "voice": "am_michael", "mix": "duck"}
+    assert clip["narration"] == ""
     assert client.get("/api/clips", params={"streamer_id": 999}).json() == []
     assert client.get("/api/clips", params={"status": "nonsense"}).status_code == 400
     assert client.get(f"/media/clips/{clip['id']}.mp4").content == b"not really a video"
@@ -126,7 +128,8 @@ def test_caption_style_and_headline_switch_on_streamers_and_clips(client, seeded
                                                                  caption_style="bold", show_headline=False)).json()
     assert streamer["caption_style"] == "bold" and streamer["show_headline"] is False
     assert worker.streamer_layout(db.get("streamers", streamer["id"])) == {
-        "type": "fill", "crop": None, "facecam": None, "gameplay": None, "caption_style": "bold", "show_headline": False}
+        "type": "fill", "crop": None, "facecam": None, "gameplay": None, "caption_style": "bold",
+        "show_headline": False, "voiceover": False, "voice": "am_michael", "mix": "duck"}
     assert client.put(f"/api/streamers/{streamer['id']}", json={"caption_style": "comic"}).status_code == 422
 
     clip_id = seeded["clips"][0]
@@ -137,6 +140,51 @@ def test_caption_style_and_headline_switch_on_streamers_and_clips(client, seeded
     assert after["layout"]["caption_style"] == "bold" and after["layout"]["show_headline"] is False
     assert after["render_state"] == "rendering"
     assert client.put(f"/api/clips/{clip_id}", json={"layout": {**before, "caption_style": "comic"}}).status_code == 422
+
+
+def test_voiceover_settings_on_streamers(client):
+    streamer = client.post("/api/streamers", json=_streamer_body(voiceover=True, voice="bm_george",
+                                                                 voiceover_mix="mute")).json()
+    assert (streamer["voiceover"], streamer["voice"], streamer["voiceover_mix"]) == (True, "bm_george", "mute")
+    layout = worker.streamer_layout(db.get("streamers", streamer["id"]))
+    assert (layout["voiceover"], layout["voice"], layout["mix"]) == (True, "bm_george", "mute")
+    assert client.put(f"/api/streamers/{streamer['id']}", json={"voice": "robot"}).status_code == 422
+    assert client.put(f"/api/streamers/{streamer['id']}", json={"voiceover_mix": "loud"}).status_code == 422
+    voices = client.get("/api/voices").json()
+    assert voices["default"] == "am_michael" and {"id": "bm_george", "label": "George (UK, male)"} in voices["voices"]
+
+
+def test_voiceover_on_a_clip_needs_a_narration_that_fits(client, seeded):
+    clip_id = seeded["clips"][0]                                   # a 41 second clip
+    layout = client.get(f"/api/clips/{clip_id}").json()["layout"]
+    on = {**layout, "voiceover": True}
+
+    empty = client.put(f"/api/clips/{clip_id}", json={"layout": on})
+    assert empty.status_code == 422 and "no narration yet" in empty.json()["detail"]
+    long = client.put(f"/api/clips/{clip_id}", json={"layout": on, "narration": "word " * 400})
+    assert long.status_code == 422 and "400 words" in long.json()["detail"]
+
+    saved = client.put(f"/api/clips/{clip_id}", json={"layout": on, "narration": "  Speed walks  into\nthe water. "}).json()
+    assert saved["narration"] == "Speed walks into the water." and saved["layout"]["voiceover"] is True
+    assert saved["render_state"] == "rendering"
+
+    db.update("clips", clip_id, {"render_state": "ready"})
+    same = client.put(f"/api/clips/{clip_id}", json={"title": "Only the title"}).json()
+    assert same["render_state"] == "ready"                         # text-only edit leaves the video alone
+    changed = client.put(f"/api/clips/{clip_id}", json={"narration": "A different script entirely."}).json()
+    assert changed["render_state"] == "rendering"
+
+    # With voiceover off, editing the stored narration does not re-render.
+    db.update("clips", clip_id, {"render_state": "ready"})
+    off = client.put(f"/api/clips/{clip_id}", json={"layout": {**layout, "voiceover": False}}).json()
+    db.update("clips", clip_id, {"render_state": "ready"})
+    assert off["layout"]["voiceover"] is False
+    assert client.put(f"/api/clips/{clip_id}", json={"narration": "Kept for later."}).json()["render_state"] == "ready"
+
+
+def test_drafting_a_narration_needs_a_key(client, seeded):
+    response = client.post(f"/api/clips/{seeded['clips'][0]}/write-narration")
+    assert response.status_code == 409 and "API key" in response.json()["detail"]
 
 
 def test_clip_edit_validation(client, seeded):
