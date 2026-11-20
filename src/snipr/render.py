@@ -23,9 +23,11 @@ def nvenc_available() -> bool:
 
 def video_codec_args() -> list[str]:
     if nvenc_available():
-        return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "21", "-b:v", "0",
-                "-maxrate", "12M", "-bufsize", "24M", "-pix_fmt", "yuv420p"]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p"]
+        # Capped at 8 Mbit/s: a one minute clip stays around 60 MB, well inside upload limits.
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-rc", "vbr", "-cq", "23", "-b:v", "0",
+                "-maxrate", "8M", "-bufsize", "16M", "-pix_fmt", "yuv420p"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "21", "-maxrate", "8M",
+            "-bufsize", "16M", "-pix_fmt", "yuv420p"]
 
 
 def run_ffmpeg(args: list[str]) -> None:
@@ -50,6 +52,105 @@ def seek_args(seek: float) -> tuple[list[str], list[str]]:
 
 
 AUDIO_ARGS = ["-c:a", "aac", "-b:a", "160k", "-af", "aresample=async=1:first_pts=0"]
+
+
+OUT_W, OUT_H = 1080, 1920
+STACK_TOP_H = 608                       # stacked layout: facecam 1080 x 608, gameplay 1080 x 1312
+STACK_BOTTOM_H = OUT_H - STACK_TOP_H
+
+
+def aspect_fit(rect: list | None, src_w: int, src_h: int, ratio: float) -> tuple[int, int, int, int]:
+    """The largest crop of aspect ``ratio`` (width / height) centred in ``rect``.
+
+    ``rect`` is ``[x, y, w, h]`` as fractions of the source frame, or None for
+    the whole frame. Returns even pixel values ``(x, y, w, h)`` inside the frame,
+    so a rectangle drawn slightly off-ratio in the form still renders undistorted.
+    """
+    if rect and len(rect) == 4 and rect[2] > 0 and rect[3] > 0:
+        rx, ry, rw, rh = (max(0.0, min(1.0, float(v))) for v in rect)
+        rw, rh = min(rw, 1.0 - rx), min(rh, 1.0 - ry)
+    else:
+        rx, ry, rw, rh = 0.0, 0.0, 1.0, 1.0
+    px, py, pw, ph = rx * src_w, ry * src_h, rw * src_w, rh * src_h
+    if pw / ph > ratio:
+        w, h = ph * ratio, ph
+    else:
+        w, h = pw, pw / ratio
+    w = max(2, int(w) // 2 * 2)
+    h = max(2, int(h) // 2 * 2)
+    x = int(px + (pw - w) / 2) // 2 * 2
+    y = int(py + (ph - h) / 2) // 2 * 2
+    return max(0, min(x, src_w - w)), max(0, min(y, src_h - h)), w, h
+
+
+def is_stacked(layout: dict | None) -> bool:
+    return bool(layout and layout.get("type") == "stacked" and layout.get("facecam") and layout.get("gameplay"))
+
+
+def frame_filters(layout: dict | None, src_w: int, src_h: int) -> str:
+    """The filter chain that turns the source picture ``[src]`` into a 1080 x 1920 ``[base]``."""
+    if is_stacked(layout):
+        fx, fy, fw, fh = aspect_fit(layout["facecam"], src_w, src_h, OUT_W / STACK_TOP_H)
+        gx, gy, gw, gh = aspect_fit(layout["gameplay"], src_w, src_h, OUT_W / STACK_BOTTOM_H)
+        return (f"[src]split=2[fa][ga];"
+                f"[fa]crop={fw}:{fh}:{fx}:{fy},scale={OUT_W}:{STACK_TOP_H}:flags=lanczos[top];"
+                f"[ga]crop={gw}:{gh}:{gx}:{gy},scale={OUT_W}:{STACK_BOTTOM_H}:flags=lanczos[bottom];"
+                f"[top][bottom]vstack=inputs=2,setsar=1[base]")
+    x, y, w, h = aspect_fit((layout or {}).get("crop"), src_w, src_h, OUT_W / OUT_H)
+    return f"[src]crop={w}:{h}:{x}:{y},scale={OUT_W}:{OUT_H}:flags=lanczos,setsar=1[base]"
+
+
+def render_clip(source: Path, source_start: float, start: float, end: float, out: Path,
+                layout: dict | None, overlays=None, src_info: dict | None = None) -> Path:
+    """Render ``start``..``end`` (VOD time) as a 1080 x 1920 clip with headline and captions.
+
+    ``overlays`` is a ``captions.Overlays``; None renders the picture alone.
+    """
+    from .platforms import probe_video
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    info = src_info or probe_video(source)
+    duration = end - start
+    seek = max(0.0, start - source_start)
+    fast = max(0.0, seek - 10.0)            # see seek_args: fast seek short of the target, then trim
+    rest = seek - fast
+    fps = min(60.0, max(24.0, round(info["fps"])))
+
+    args: list[str] = []
+    if fast > 0:
+        args += ["-ss", f"{fast:.3f}"]
+    args += ["-i", str(source)]
+    graph = [f"[0:v]trim=start={rest:.3f}:duration={duration:.3f},setpts=PTS-STARTPTS,fps={fps:g}[src]",
+             frame_filters(layout, info["width"], info["height"])]
+    last = "base"
+    index = 1
+    if overlays is not None and overlays.headline_png is not None:
+        args += ["-i", str(overlays.headline_png)]
+        x, y = overlays.headline_xy
+        graph.append(f"[{last}][{index}:v]overlay={x}:{y}:format=auto[withhead]")
+        last, index = "withhead", index + 1
+    if overlays is not None and overlays.captions_list is not None:
+        args += ["-f", "concat", "-safe", "0", "-i", str(overlays.captions_list)]
+        graph.append(f"[{last}][{index}:v]overlay=0:{overlays.captions_y}:format=auto[withcaps]")
+        last, index = "withcaps", index + 1
+    graph.append(f"[{last}]format=yuv420p[v]")
+    graph.append(f"[0:a]atrim=start={rest:.3f}:duration={duration:.3f},asetpts=PTS-STARTPTS,"
+                 f"aresample=async=1:first_pts=0[a]")
+    args += ["-filter_complex", ";".join(graph), "-map", "[v]", "-map", "[a]",
+             "-t", f"{duration:.3f}", *video_codec_args(), "-c:a", "aac", "-b:a", "160k",
+             "-movflags", "+faststart", str(out)]
+    run_ffmpeg(args)
+    return out
+
+
+def grab_frame(source: Path, at: float, out: Path, width: int | None = None) -> Path:
+    """Save one frame of a local video as an image."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    args = ["-ss", f"{max(0.0, at):.3f}", "-i", str(source), "-frames:v", "1"]
+    if width:
+        args += ["-vf", f"scale={width}:-2"]
+    run_ffmpeg([*args, "-update", "1", str(out)])
+    return out
 
 
 def cut_plain(source: Path, source_start: float, start: float, end: float, out: Path) -> Path:

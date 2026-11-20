@@ -146,9 +146,25 @@ def transcribe(path: Path, model_name: str = "medium", compute_type: str = "int8
                 progress(done / audio_seconds if audio_seconds else 1.0)
     wall = time.perf_counter() - started
     segments.sort(key=lambda s: s["s"])
-    words = [w for seg in segments for w in seg["w"]]
+    words = merge_fragments([w for seg in segments for w in seg["w"]])
     stats = TranscribeStats(audio_seconds, wall, device, model_name, ctype)
     return {"segments": split_sentences(words)}, stats
+
+
+def merge_fragments(words: list[list]) -> list[list]:
+    """Join pieces the model timed separately but that belong to one word.
+
+    "y" + "'all" becomes "y'all", and a stray punctuation mark is attached to
+    the word before it, so captions never show a fragment on its own.
+    """
+    merged: list[list] = []
+    for start, end, text in words:
+        fragment = text[:1] in "'’" or not any(ch.isalnum() for ch in text)
+        if merged and fragment and start - merged[-1][1] < 0.5:
+            merged[-1] = [merged[-1][0], end, merged[-1][2] + text]
+        else:
+            merged.append([start, end, text])
+    return merged
 
 
 def split_sentences(words: list[list], max_gap_s: float = 1.0, max_len_s: float = 25.0) -> list[dict]:

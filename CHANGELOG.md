@@ -2,6 +2,14 @@
 
 Each milestone in `docs/design.md` gets a version bump and a git tag: milestone N is `v0.N.0`.
 
+## v0.3.0 — milestone 3: vertical reframing, headline and captions
+
+- Clips render at 1080 x 1920: Fill frame (one 9:16 crop, centre by default) or Stacked (facecam 1080 x 608 above gameplay 1080 x 1312).
+- Headline plate and word-by-word captions drawn to the Designer's clip format spec, with the current word on the purple box. Chakra Petch and Inter are bundled.
+- Crop rectangles are stored as fractions of the frame and fitted to the slot's aspect ratio, so they work at any source resolution.
+- Checked on real footage in both layouts. A 56 s clip renders in about 37 s on the RTX 2050.
+- Word fragments from the transcript ("y" + "'all") are joined before captioning.
+
 ## v0.2.0 — milestone 2: selection for all three modes
 
 - Claude provider behind two functions, `select_segments` and `write_metadata`; model `claude-haiku-5-5`.

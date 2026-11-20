@@ -58,7 +58,7 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     span = (min(lo for lo, _ in ranges), max(hi for _, hi in ranges))
     whole = span[0] <= 1.0 and span[1] >= vod.duration - 1.0
     # Bump "v" when the format of a saved step changes, so old results are redone.
-    key = {"v": 2, "span": [round(span[0]), round(span[1])],
+    key = {"v": 3, "span": [round(span[0]), round(span[1])],
            "ranges": [[round(a), round(b)] for a, b in ranges]}
     state_path = work / "analysis.json"
     state = json.loads(state_path.read_text(encoding="utf-8")) if state_path.exists() else {}
@@ -132,6 +132,24 @@ def analyze(vod: VodInfo, ranges: list[tuple[float, float]] | None = None,
     progress("transcribe", 1.0)
 
     return Analysis(vod, work, audio_path, span, ranges, loudness, chat_rate, transcript, stats)
+
+
+def produce(source: Path, source_start: float, start: float, end: float, transcript: dict,
+            headline: str, layout: dict | None, out_path: Path) -> Path:
+    """Render one clip: reframe to 9:16, burn in the headline and the captions."""
+    import shutil
+    import tempfile
+
+    from . import captions, render
+
+    words = [[w[0] - start, w[1] - start, w[2]] for w in transcribe.words_between(transcript, start, end)]
+    overlay_dir = Path(tempfile.mkdtemp(prefix="snipr-overlay-"))
+    try:
+        overlays = captions.build_overlays(words, headline, end - start, overlay_dir,
+                                           stacked=render.is_stacked(layout))
+        return render.render_clip(source, source_start, start, end, out_path, layout, overlays)
+    finally:
+        shutil.rmtree(overlay_dir, ignore_errors=True)
 
 
 def fetch_source(vod: VodInfo, analysis_audio: Path, span_start: float, start: float, end: float,

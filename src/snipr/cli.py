@@ -95,10 +95,22 @@ def cmd_clip(args: argparse.Namespace) -> int:
             vod, analysis.audio_path, analysis.span[0], seg.start, seg.end,
             analysis.workdir / "sources" / f"cand{index}",
             pad_s=settings["ingest"]["source_pad_s"], height=settings["ingest"]["video_height"])
-        clip_path = render.cut_plain(source, source_start, seg.start, seg.end, out_dir / f"clip{index}.mp4")
+        target = out_dir / f"clip{index}.mp4"
+        meta = {}
+        if args.layout == "source":
+            clip_path = render.cut_plain(source, source_start, seg.start, seg.end, target)
+        else:
+            from . import llm as llm_module, transcribe
+            text = transcribe.text_between(analysis.transcript, seg.start, seg.end)
+            game = next((c["title"] for c in vod.chapters if c["start"] <= seg.start < c["end"]), "")
+            meta = (llm.write_metadata(text, vod.uploader, vod.title, seg.title, game) if llm
+                    else llm_module.fallback_metadata(text, vod.title, game))
+            clip_path = pipeline.produce(source, source_start, seg.start, seg.end, analysis.transcript,
+                                         meta["headline"], {"type": "fill", "crop": None}, target)
+            print(f"    headline: {meta['headline']}")
         print(f"    {clip_path}")
         report.append({"file": str(clip_path), "start": seg.start, "end": seg.end, "score": seg.score,
-                       "title": seg.title, "reason": seg.reason, "flags": list(seg.flags)})
+                       "title": seg.title, "reason": seg.reason, "flags": list(seg.flags), **meta})
     (out_dir / "candidates.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"Wrote {len(report)} clips to {out_dir}")
     return 0
@@ -140,6 +152,8 @@ def build_parser() -> argparse.ArgumentParser:
     clip.add_argument("--start", type=float, help="only process the VOD from this second")
     clip.add_argument("--end", type=float, help="only process the VOD up to this second")
     clip.add_argument("--no-llm", action="store_true", help="pick on chat and loudness alone")
+    clip.add_argument("--layout", choices=["fill", "source"], default="fill",
+                      help="fill: 9:16 centre crop with headline and captions; source: original framing")
     clip.add_argument("--out", help="folder for the clips (default: the VOD's working folder)")
     clip.set_defaults(func=cmd_clip)
 
