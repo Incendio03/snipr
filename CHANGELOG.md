@@ -3,9 +3,15 @@
 Each milestone in `docs/design.md` gets a version bump and a git tag: milestone N is `v0.N.0`.
 
 ## Unreleased
-- Timed narration: each line can start with a time like `[12.5]`, `[pause]` leaves a gap, the streamer is heard between lines, and the AI reads the clip's transcript with timestamps.
-- Default narration style per streamer.
 
+## v0.8.0 — free AI, manual processing, narration you direct
+
+Not a milestone from `docs/design.md`; a release for everything added after voiceover.
+
+- **Narration you direct.** Write how the narrator should sound, save that as a template, set a default style per streamer, and have Snipr rewrite a narration you typed.
+- **Timed narration.** Each line can start with a time like `[12.5]`, `[pause]` leaves a gap, the streamer is heard between lines, and the AI reads the clip's transcript with timestamps. Nothing in brackets is spoken or shown.
+- For narration, Gemini's stronger free models (`gemini-3.8-flash`, `gemini-3-flash-preview`) are tried first, then the chosen model. The request states how much to write, and a too-thin answer is asked for once more. The Pro models are not on the free tier. **No stronger model has answered a narration live yet** (overloaded on 2026-11-21).
+- The page's files are served with `no-cache`, so an update shows on a normal reload.
 - **Processing is manual by default.** New streams are still found by themselves and listed on Activity, but nothing heavy starts until Run now is pressed. A time window is an option in Settings for processing unattended. A job interrupted by a restart carries on by itself.
 - **Gemini as a second AI provider.** Settings has a provider choice (Claude or Gemini), a key for each, a model name for each, and a "Test connection" button. Gemini has a free tier; on it Google uses what is sent to improve its products.
 - Gemini checked against the live API on 2026-11-21: `gemini-3.5-flash-lite` and `gemini-3.1-flash-lite` answer in under two seconds; `gemini-3.8-flash` and `gemini-3.6-flash` were overloaded. The default is now `gemini-3.5-flash-lite`, an overloaded model falls back to a Flash-Lite one, brief outages and rate limits are waited out, and errors carry Google's own explanation.
